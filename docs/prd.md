@@ -1071,7 +1071,18 @@ G-code, keys, notes. Committed test data goes in `tests/fixtures/` instead. Same
   same settings key and the same `numExtruders` / `hasBed` options, registering port `VIRTUAL`
   through a serial factory. The snippet above is correct as written.
 - A second profile with a **single-extruder** printer profile, for the non-MMU path.
-- Anonymous/pre-seeded OctoPrint user so no first-run setup is needed.
+- **The bundled Software Update plugin must be disabled** (`plugins._disabled: [softwareupdate]`).
+  OctoPrint ranks 1.11.8 as the latest *stable* and 2.0.0rc4 as a prerelease, so the updater offers
+  a **downgrade off the target version**, which silently destroys the dev environment. Belt and
+  braces: `plugins.softwareupdate.checks.octoprint.prerelease_channel: rc/devel` so a re-enabled
+  updater still tracks RCs rather than stable.
+
+  The image is the single source of truth for the OctoPrint version. An in-container `pip install`
+  writes to `site-packages`, which is **not** in the mounted volume, so it is silently discarded
+  when the container is recreated — a version bump means editing the `OCTOPRINT_VERSION` build arg
+  and rebuilding, never updating from inside.
+- Credentials for the dev instance live in `private_data/dev-credentials.md` (gitignored), never in
+  the repo.
 
 ### Test G-code fixtures
 

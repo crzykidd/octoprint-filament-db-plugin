@@ -97,6 +97,29 @@ OctoPrint comes up on **http://localhost:5000**. Override with `OCTOPRINT_PORT` 
 
 To re-seed steps 2–3 from scratch, delete `private_data/octoprint/` and bring the stack back up.
 
+### Never let the dev container self-update
+
+OctoPrint's Software Update plugin treats **2.0.0rc4 as a prerelease and 1.11.8 as the latest
+stable**, so it offers an "update" that is really a **downgrade** — straight off the version this
+plugin targets. Accepting it silently breaks the dev environment.
+
+The bundled updater is therefore **disabled** in the dev container
+(`plugins._disabled: [softwareupdate]`), with `prerelease_channel: rc/devel` set as a second line
+of defence in case it is ever switched back on. **Leave it disabled.**
+
+The image is the single source of truth for the OctoPrint version, and it should stay that way:
+an in-container `pip install` writes to `site-packages`, which is *not* in the mounted volume, so
+it silently vanishes the next time the container is recreated. To move to a newer RC, bump the
+version and rebuild:
+
+```bash
+# docker-compose.dev.yml → services.octoprint.build.args.OCTOPRINT_VERSION
+docker compose -f docker-compose.dev.yml up -d --build
+```
+
+The build asserts the installed version starts with `2.`, so a bad bump fails loudly instead of
+leaving you on 1.x.
+
 ### `private_data/` — local only
 
 Everything mutable lives in `private_data/`, which is **gitignored in full**: the OctoPrint volume
