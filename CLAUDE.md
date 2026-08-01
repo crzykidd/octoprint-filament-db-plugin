@@ -26,6 +26,12 @@ the v1 spec and it contains hard constraints that are expensive to rediscover, i
 
 Current status: **pre-alpha, design only — no application code yet.**
 
+**Licence: AGPLv3. All code must be original.** Prior art (notably
+[`mdziekon/octoprint-spoolman`](https://github.com/mdziekon/octoprint-spoolman)) may be *read and
+cited* to understand a problem, but **never copied** — not its odometer, not OctoPrint's vendored
+`gcodeInterpreter`, not any other plugin's source. Licences are compatible; this is a deliberate
+engineering choice, recorded in `docs/decisions.md`. New source files carry an AGPLv3 header.
+
 ## Task → file routing
 
 **Read only what the task needs.** The layering (PRD rule N-3) guarantees these lists are

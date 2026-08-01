@@ -67,6 +67,21 @@ It talks to Filament DB **natively**. It does not require, use, or sync through
 Design complete, implementation not started. See the PRD for the v1 scope and the open questions
 still to be resolved against a live OctoPrint 2.0 instance.
 
+## Prior art
+
+[`mdziekon/octoprint-spoolman`](https://github.com/mdziekon/octoprint-spoolman) solves the
+equivalent problem for [Spoolman](https://github.com/Donkie/Spoolman) and was studied as prior art
+while designing this plugin — its UX shape (a sidebar of loaded spools, a tab with a picker,
+pre-print checks) is a good one and informed the design here.
+
+**No code is reused from it.** This is a fresh implementation. Filament DB's data model and write
+path differ fundamentally from Spoolman's — grams versus millimetres, a gross weight model, spools
+embedded on filaments, and a single transactional print-history write that debits weight itself —
+so there is little that would transfer even if it were desirable. Where behaviour is deliberately
+similar it is described in the [PRD](docs/prd.md) and arrived at independently.
+
 ## License
 
-To be determined before the first release.
+[GNU Affero General Public License v3.0](LICENSE) — the same license OctoPrint itself uses.
+
+Copyright (C) 2026 crzykidd

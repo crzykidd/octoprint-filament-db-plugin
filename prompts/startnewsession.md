@@ -115,11 +115,12 @@ Nothing is in flight. The design is settled and the repo scaffolding is in place
   3. `hyiger/filament-db#1039` — post the design to the thread; it answers the OP's request.
   4. `hyiger/PrusaSlicer` (Filament Edition fork) — inject the OpenPrintTag UUID / FDB id into
      the G-code config block, which would make FR-13 auto-matching exact instead of fuzzy.
-- **Cheap data capture worth doing during v1:** on the next filament runout, open OctoPrint's
-  **Terminal tab** and capture the raw `// action:…` line the firmware sends. That identifies the
-  exact signal this printer emits, which lets FR-12's 1.1 work *pre-fill* the changeover prompt
-  instead of merely asking. Not required for correctness — v1 records a marker on every pause
-  regardless — but it costs one runout.
+- **Real MMU3 runout capture is committed** at `tests/fixtures/serial/mmu3-filament-change-runout.md`
+  — use it, don't invent serial fixtures. It validates the odometer against firmware `M114`
+  (exact match), and it **disproved** the earlier assumption that a filament change produces a
+  visible pause: there is no `M600`, no `// action:` command, and the send queue simply stalls.
+  **Q-7 (does `PrintPaused` fire at all here?) is still open** — until answered, the vendor-neutral
+  stall watchdog is the only detection signal that can be relied on.
 - **Needs real hardware to verify:** FR-3 tool attribution with an **MMU3 + `Octoprint-PrusaMMU`**
   installed. That plugin intercepts `Tx` at the `gcode.queuing` phase, and a suppressed command
   never reaches `gcode.sent` — so the odometer can miss a tool change. The virtual printer cannot

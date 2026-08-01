@@ -33,6 +33,67 @@ defensively against OctoPrint's own state, and cross-check the per-tool split at
 against the slicer's per-extruder `filament used [mm]` array — if the total agrees but the split
 does not, warn instead of writing a confidently wrong attribution.
 
+## 2026-08-01 — A real MMU3 capture disproved the "every pause is a marker" assumption
+
+A live serial capture of an MMU3 runout/jam was taken from hardware and committed as
+`tests/fixtures/serial/mmu3-filament-change-runout.md`. It **contradicted the preceding decision**
+(one entry below), which assumed the print would end up paused and `PrintPaused` would fire.
+
+What the capture actually shows:
+
+- **No `M600`** in the outgoing stream — as predicted.
+- **No `// action:` commands at all** — so `octoprint.comm.protocol.action` is not a usable signal.
+  That was the mechanism the previous decision leaned on.
+- **The outgoing stream just stops.** Last command `N2419`, next command `N2448`, with only
+  `echo:busy: processing` inbound in between. **OctoPrint is blocked on serial flow control, not
+  paused** — from its perspective the print is still `Printing`.
+
+So `PrintPaused` cannot be assumed to fire (now Q-7, unverified). The design widens from "watch for
+a pause" to **"watch for any evidence the extrusion timeline was interrupted"**, with five signals,
+of which the important one is vendor-neutral: **a prolonged outbound stall while the state is
+`Printing`** while inbound traffic continues. No firmware dialect needed. `echo:MMU2:` message
+parsing is added as a strong Prusa-specific signal. False-positive markers are cheap — an
+unresolved marker changes nothing unless the user acts on it.
+
+**Two further findings from the same capture:**
+
+1. **The odometer model is validated against real firmware.** Between `G92 E0.0` (N2386) and `M114`
+   (N2406) the relative-E sum — including a `G92` reset and a retract/prime pair netting to zero —
+   is **4.05109 mm**, and the firmware replies `E:4.05`. Exact match. This becomes a unit-test
+   assertion grounded in hardware rather than invented data.
+2. **Firmware extrudes without the host seeing it.** During the MMU sequence the extruder position
+   moves **4.05 → 9.67 mm (+5.62 mm)** with no host-issued command. The odometer structurally
+   cannot observe this. Mass impact is negligible here (~0.017 g) but the error is **systematic and
+   always an under-count**, and a full tool change with firmware-side ramming would be larger. v1
+   accepts and documents it; reconciling against firmware position reports is noted as a later
+   mitigation, not v1 scope.
+
+**Process note:** this is the second design assumption in FR-12 overturned by evidence rather than
+reasoning. Detection of physical events should be treated as unverified until a capture proves it,
+and the vendor-neutral backstop should always be the primary path.
+
+## 2026-08-01 — AGPLv3, and a clean-room implementation
+
+**Licence: AGPLv3.** Matches the ecosystem — OctoPrint itself and `mdziekon/octoprint-spoolman`
+are both AGPLv3 — so the plugin is licence-compatible with everything it sits next to, and the
+network-use clause is appropriate for something that runs as a self-hosted web-facing service.
+
+**All code is original. Nothing is copied from `octoprint-spoolman` or any other plugin.** The
+licences are compatible, so this is an engineering decision rather than a legal one:
+
+- Almost nothing would transfer. Filament DB uses grams (not millimetres), a gross weight model,
+  spools embedded on filaments, and one transactional print-history write that debits weight
+  itself. Every layer below metering differs.
+- The odometer specifically must be original. `octoprint-spoolman` vendors OctoPrint's
+  `gcodeInterpreter`, which is designed for static file analysis. This plugin needs a live,
+  per-tool, pause-aware accumulator that handles `G2`/`G3` arcs (FR-5) — precisely the gap raised
+  in filament-db#1039 — plus pause markers (FR-12). Adapting the vendored interpreter would be
+  more work than writing the state machine, and harder to test.
+
+Studying prior art to understand a problem is fine and is cited where done; copying source is not.
+Recorded because "why didn't we just reuse the Spoolman plugin's odometer?" is an obvious future
+question.
+
 ## 2026-08-01 — The write journal is a P0 differentiator, and it replaces the separate commit queue
 
 Promoted from a sub-bullet of FR-9 to its own requirement (FR-9b). The motivating observation: the

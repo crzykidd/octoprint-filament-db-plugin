@@ -40,9 +40,24 @@ public [OctoPrint Plugin Repository](https://plugins.octoprint.org/).
 analogue and the model for the UX (sidebar of loaded spools, tab with a picker, pre-print checks).
 Its metering approach — a vendored `gcodeInterpreter` driven as a coroutine off the gcode-sent
 hook, committed on `PRINT_DONE` / `PRINT_FAILED` / `PRINT_CANCELLED` with a `lastPrintCancelled`
-flag to dedupe the cancel→fail event pair — is sound and is adopted here in structure. Everything
-below the metering layer is new, because Filament DB's data model and write path differ
-fundamentally from Spoolman's.
+flag to dedupe the cancel→fail event pair — is sound, and the *event-handling shape* is arrived at
+independently here for the same reasons (the cancel→fail duplicate is a real OctoPrint behaviour
+anyone must handle).
+
+**This is a clean-room implementation — no code is copied from it.** The licences are compatible
+(both AGPLv3), so this is a deliberate engineering choice rather than a legal constraint:
+
+- Everything below the metering layer would have to be rewritten anyway. Filament DB works in
+  **grams** where Spoolman works in millimetres, uses a **gross** weight model, embeds spools on
+  filaments, and exposes a single transactional print-history write that debits weight itself
+  (C-1, C-2, C-3). Almost nothing transfers.
+- The odometer specifically must be original. `octoprint-spoolman` vendors OctoPrint's own
+  `gcodeInterpreter`, which is built for static file analysis; this plugin needs a live,
+  per-tool, pause-aware accumulator that handles `G2`/`G3` arcs (FR-5) — the very gap raised in
+  [filament-db#1039](https://github.com/hyiger/filament-db/issues/1039).
+
+Referencing its behaviour to understand a problem is fine and is cited where done. Copying its
+source is not.
 
 ---
 
@@ -501,6 +516,31 @@ State it must model correctly:
 - **Never count** commands the plugin itself or another plugin injects outside the print stream.
   Filter on the printing state, not merely on receiving the hook.
 
+**Validated against real hardware.** The capture in
+[`tests/fixtures/serial/mmu3-filament-change-runout.md`](../tests/fixtures/serial/mmu3-filament-change-runout.md)
+confirms the accumulation model exactly. Between `G92 E0.0` at `N2386` and `M114` at `N2406`, the
+relative-E sum — including a `G92` reset and a retract/prime pair netting to zero — comes to
+**4.05109 mm**, and the firmware answers `E:4.05`. That is a ready-made unit-test assertion against
+real firmware behaviour rather than invented data, and it covers `M83`, `G92`, and retraction
+netting in one go.
+
+**Known accuracy limit — firmware can extrude without the host seeing it.** The same capture shows
+the extruder position moving **4.05 → 9.67 mm (+5.62 mm) with no host-issued command**, during the
+MMU unload/eject sequence. The odometer cannot observe this: those moves never appear in
+`gcode.sent`.
+
+The mass involved here is negligible — 5.62 mm of 1.75 mm filament is about **0.017 g** — but the
+error is **systematic and always in the same direction** (under-count), and a full multi-material
+tool change with firmware-side ramming would be materially larger. v1 accepts this and documents it
+rather than pretending to precision it does not have. Two mitigations are noted for later, neither
+in v1 scope:
+
+- Firmware position reports (`Recv: X:… E:…`, seen unsolicited in the capture) carry the extruder's
+  own E counter. Reconciling the odometer against it between `G92` resets would both *detect* and
+  *quantify* the drift.
+- Any changeover marker (FR-12) implies a firmware-side sequence occurred, so the marker itself is a
+  hint that a gap exists at that point in the timeline.
+
 **Known interaction risk — another plugin can hide a command from the odometer.** A handler on
 `octoprint.comm.protocol.gcode.queuing` may suppress a command by returning `None,`, and a
 suppressed command **never reaches the `gcode.sent` phase**. `Octoprint-PrusaMMU` does this to `Tx`
@@ -853,18 +893,48 @@ the firmware emitting an action command, which Prusa historically did not do on 
 ([Prusa-Firmware#805](https://github.com/prusa3d/Prusa-Firmware/issues/805)) and which still varies
 by model and firmware version.
 
-But the host *does* find out that something happened. OctoPrint natively handles the
-`// action:pause` and `// action:paused` commands and pauses the print itself, and the bundled
-Action Command Prompt / Action Command Notification plugins render firmware-initiated dialogs — the
-"unexpected event on the printer" style popup users see on a runout. Whatever the specific signal,
-**the print ends up paused, and OctoPrint fires `PrintPaused`.**
+**A real capture disproved the simple version of this.** A live MMU3 runout/jam was captured from
+hardware — see [`tests/fixtures/serial/mmu3-filament-change-runout.md`](../tests/fixtures/serial/mmu3-filament-change-runout.md).
+It shows:
 
-That reframes the problem. The plugin does not need to know *why* the print paused, or to recognize
-any particular firmware dialect. It needs to know *where in the extrusion timeline* a spool change
-could have happened. So:
+- **No `M600` in the outgoing stream.** As predicted.
+- **No `// action:` commands whatsoever.** So OctoPrint's native action-command handling never
+  fires, and `octoprint.comm.protocol.action` is *not* a usable signal here. This was the mechanism
+  an earlier draft leaned on.
+- **The outgoing stream simply stops.** The last command before the event is `N2419`; the next is
+  `N2448`. In between there are only inbound lines — `echo:busy: processing` repeating while the
+  firmware does everything itself. **OctoPrint is blocked on serial flow control, not paused.**
+  From its point of view the print is still `Printing`, just slow.
 
-> **Every pause is a candidate changeover boundary.** On `PrintPaused`, snapshot the odometer's
-> per-tool totals and append a marker `{timestamp, {tool_index: millimetres}}` to the job state.
+So **`PrintPaused` cannot be assumed to fire.** Whether it does for this event is still unverified
+(Q-7) and must not be designed around until it is.
+
+What the capture *does* give is a rich, unambiguous inbound signal:
+
+```
+echo:MMU2:Unloading to FINDA        echo:MMU2:Ejecting filament
+echo:MMU2:FSENSOR FIL. STUCK        echo:MMU2:FILAMENT EJECTED
+echo:MMU2:Parking selector          echo:MMU2:Saving and parking
+```
+
+The design therefore widens from "watch for a pause" to **"watch for any evidence the extrusion
+timeline was interrupted."** A changeover marker is recorded on *any* of:
+
+| Signal | Source | Covers |
+|---|---|---|
+| `PrintPaused` / `PrintResumed` events | OctoPrint | host-side pause, slicer `M600` routed through pause commands, user clicking pause |
+| `M600` / `M601` seen outbound | `gcode.sent` | slicer- or user-issued change |
+| `// action:pause` / `paused` | `octoprint.comm.protocol.action` | firmware that does announce itself |
+| **`echo:MMU2:` state messages** | received-line hook | **Prusa MMU — the case that produced this capture** |
+| **A prolonged outbound stall while `Printing`** | send-timestamp watchdog | **the universal backstop — no firmware dialect needed** |
+
+The last row is the important one. It requires no vendor-specific parsing: if the print state is
+`Printing` and nothing has been sent for longer than a threshold (default ~90 s, configurable) while
+inbound traffic continues, something interrupted the job. Record a marker. False positives are
+cheap — an unresolved marker changes nothing unless the user acts on it.
+
+> **Record a changeover marker on any interruption signal**, snapshotting the odometer's per-tool
+> totals as `{timestamp, source, {tool_index: millimetres}}`.
 
 This is robust by construction across every case that matters, and the cases are broader than MMU:
 
@@ -1001,6 +1071,7 @@ block preserved):
 |---|---|
 | PrusaSlicer, single tool | baseline; config block with type + grams |
 | PrusaSlicer, 5-tool MMU | per-extruder arrays, `T<n>` changes, shared nozzle |
+| **Real MMU3 runout capture** (`serial/mmu3-filament-change-runout.md`) | **real hardware** — relative-E validation against firmware `M114`, arc extrusion, `G92` reset, the `echo:MMU2:` message sequence, and the outbound stall. Prefer this over synthetic data for FR-5 and FR-12 tests. |
 | OrcaSlicer | config-block dialect differences |
 | Cura | **no** `filament_type` — the skipped-check path |
 | Arc-heavy (`G2`/`G3`) | odometer arc handling |
@@ -1057,6 +1128,8 @@ both do), or record the deviation and define a minimal branch rule directly in t
 | Q-4 | Does OctoPrint 2.0 model MMU as `extruder.count=N, sharedNozzle=true`, or is there a new tool abstraction? | FR-3 | Read 2.0 printer-profile source |
 | Q-5 | Exact value of `MAX_USAGE_GRAMS` in Filament DB | FR-7 validation | Read `print-history/route.ts` constants |
 | Q-6 | Does `POST /api/print-history` require `spoolId`, or does omitting it pick a spool automatically? | FR-7 | Source suggests it falls back to the first non-retired spool with weight — confirm and always send `spoolId` explicitly regardless |
+| Q-7 | **Does OctoPrint fire `PrintPaused` during a firmware-driven MMU filament change?** The serial capture shows no `// action:` command and a stalled send queue, so it may stay in `Printing` the whole time. | FR-12 detection | Reproduce the event with plugin-side event logging, or check OctoPrint's own event log against the capture timestamps. **Until answered, the stall watchdog is the only signal that can be relied on.** |
+| Q-8 | Which OctoPrint hook exposes *received* lines, for `echo:MMU2:` parsing? (`octoprint.comm.protocol.gcode.received` or equivalent in 2.0) | FR-12 detection | 2.0 hooks reference |
 
 ## Upstream asks (file as issues)
 
