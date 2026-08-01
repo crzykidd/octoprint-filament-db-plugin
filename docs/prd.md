@@ -1,0 +1,1108 @@
+# Product Requirements Document: octoprint-filament-db-plugin
+
+**Status:** v1 design — pre-alpha, no code yet
+**Target:** OctoPrint 2.0 (2.0.0rc4+ / 2.0 GA)
+**Date:** 2026-08-01
+
+---
+
+## Problem statement
+
+[Filament DB](https://github.com/hyiger/filament-db) is the source-of-truth store for filament
+inventory, material profiles, calibrations and print history. OctoPrint is where prints actually
+run and where filament is actually consumed. Today nothing connects them: a user prints, filament
+is spent, and Filament DB's spool weights drift from reality until someone weighs a spool and
+edits it by hand.
+
+A partial path exists — Spoolman's OctoPrint plugin decrements Spoolman, and a separate sync
+service propagates those decrements into Filament DB as usage entries. That works, but it requires
+running Spoolman purely as a relay for the print-side path, and it loses fidelity: the sync sees a
+weight delta, not a print job.
+
+## Solution
+
+An OctoPrint plugin that talks to **Filament DB natively**. The user assigns a Filament DB spool
+to each of the printer's tools; the plugin meters actual extrusion during the print and, when the
+job reaches a terminal state, writes a single **print history record** back to Filament DB with the
+job name and per-spool grams consumed — including partial usage on a cancelled or failed print.
+
+No Spoolman. No bridge dependency on the write-back path.
+
+## Users
+
+Self-hosters running OctoPrint against a LAN Filament DB instance, on single-tool printers,
+multi-tool printers, and MMU setups. Primary user is the author; the plugin is intended for the
+public [OctoPrint Plugin Repository](https://plugins.octoprint.org/).
+
+## Prior art
+
+[`mdziekon/octoprint-spoolman`](https://github.com/mdziekon/octoprint-spoolman) is the closest
+analogue and the model for the UX (sidebar of loaded spools, tab with a picker, pre-print checks).
+Its metering approach — a vendored `gcodeInterpreter` driven as a coroutine off the gcode-sent
+hook, committed on `PRINT_DONE` / `PRINT_FAILED` / `PRINT_CANCELLED` with a `lastPrintCancelled`
+flag to dedupe the cancel→fail event pair — is sound and is adopted here in structure. Everything
+below the metering layer is new, because Filament DB's data model and write path differ
+fundamentally from Spoolman's.
+
+---
+
+## Naming & repo
+
+| Thing | Value |
+|---|---|
+| GitHub repo | `crzykidd/octoprint-filament-db-plugin` |
+| Python package | `octoprint_filamentdb` |
+| Plugin identifier | `filamentdb` |
+| Settings namespace | `plugins.filamentdb.*` |
+| Plugin API prefix | `/api/plugin/filamentdb` |
+
+The OctoPrint cookiecutter's `OctoPrint-<Name>` repo form is a **convention, not a requirement** —
+the plugin repository lists plugins by their manifest, not their repo name, and the closest
+reference plugin ([`mdziekon/octoprint-spoolman`](https://github.com/mdziekon/octoprint-spoolman))
+is lowercase-hyphenated too.
+
+The **package name and plugin identifier are not free** — `octoprint_filamentdb` must be a valid
+importable Python package, and `filamentdb` is baked into the settings path
+(`plugins.filamentdb.*`), the API prefix (`/api/plugin/filamentdb`), template and asset names, and
+the plugin manifest. Those follow OctoPrint's rules regardless of what the repo is called.
+
+---
+
+## Critical design constraints
+
+These are findings from reading the Filament DB and OctoPrint sources, not assumptions. They drive
+the architecture and every one of them would be an expensive mistake to discover during
+implementation.
+
+### C-1: `POST /api/print-history` debits spool weight itself
+
+`src/app/api/print-history/route.ts` does all of the following inside one MongoDB transaction, with
+rollback on failure:
+
+- decrements `spool.totalWeight` by `grams`, clamped at 0
+- appends a `usageHistory` entry tagged `source: "job"` so analytics knows it is already
+  represented by a print-history record
+- creates the `PrintHistory` document
+
+**Therefore the plugin calls `POST /api/print-history` and nothing else.** It must *never* also
+call `POST /api/filaments/:id/spools/:spoolId/usage` for the same print — that would double-debit
+every job. The per-spool usage endpoint is for manual weight corrections and is out of scope.
+
+This also gives deletion semantics for free: `DELETE /api/print-history/:id` refunds the spool
+weight atomically, so a user who mis-assigns a spool can undo the whole job from the Filament DB UI.
+
+### C-2: Filament DB is a **gross** weight model, measured in grams
+
+`spool.totalWeight` is gross (filament + reel). The filament-level `spoolWeight` (tare) and
+`netFilamentWeight` are shared across all spools of that filament. The API accepts and returns
+**grams** — there is no length-based endpoint. Spoolman's `PUT /spool/:id/use` takes millimetres
+and does the conversion server-side; **Filament DB does not.** The plugin owns the mm→g conversion.
+
+**The number a user sees as "remaining" is net, and it is derived, not stored:**
+
+```
+remainingWeight = spool.totalWeight − filament.spoolWeight     // gross − tare
+```
+
+Two consequences the plugin must respect. First, `spoolWeight` is **nullable and inherited** —
+variants typically store `null` and take the parent's value — so computing net locally is a trap;
+use `GET /api/filaments/:id/spool-check` (FR-4), which resolves inheritance and the null guards
+already. Second, **writes debit the gross while checks read the net**, which is what makes the
+over-usage case in FR-7 behave the way it does.
+
+### C-3: Spools are embedded subdocuments, not a collection
+
+There is no standalone spool endpoint. Every spool lives in `spools[]` on its filament document,
+and every spool operation is addressed as `(filamentId, spoolId)`. To build a picker the plugin
+fetches `GET /api/filaments` (list projection, embedded spools included) and flattens client-side.
+There is no server-side spool search.
+
+### C-4: `density` is nullable, `diameter` is not
+
+From `src/models/Filament.ts`: `diameter: { type: Number, default: 1.75, min: 0.01 }` — always
+present. `density: { type: Number, default: null, min: 0 }` — **may be null**, and the mm→g
+conversion is impossible without it. This needs an explicit fallback strategy (FR-6).
+
+### C-5: The print-history `source` enum has no `"octoprint"` value
+
+Accepted values are `manual | prusaslicer | orcaslicer | bambu | other`; anything else falls back to
+the default. v1 sends `source: "other"` and identifies itself in `notes`. **Upstream ask:** file an
+issue on `hyiger/filament-db` to add `"octoprint"` to the enum, then switch.
+
+### C-6: OctoPrint 2.0 breaking changes that touch this plugin
+
+Targeting 2.0 only means writing against the post-cleanup APIs from day one — no compat shims:
+
+- **Blueprint endpoints are CSRF-protected by default.** The plugin's API needs `@csrf_exempt()`
+  on anything called outside OctoPrint's own JS, or must send the token.
+- `octoprint.access.users.*` is snake_case; `octoprint.users` is gone.
+- `admin_permission` / `user_permission` are removed — declare explicit permissions via
+  `octoprint.access.permissions`.
+- `get_plugin_data_folder()` comes from `OctoPrintPlugin`, not `PluginSettings`.
+- Serial settings moved to `plugins.serial_connector.*` (relevant to the dev environment, not the
+  plugin itself).
+- Packaging should be `pyproject.toml` with build isolation, not `setup.py`.
+- `netifaces` / `passlib` are no longer bundled — not needed here, but the rule applies to any dep.
+- JS: `OctoPrintClient.users` → `OctoPrintClient.access.users`; `usersViewModel` →
+  `accessViewModel.users`.
+
+`octoprint.comm.protocol.gcode.sent` **survives 2.0** — verified in the 2.0 hooks documentation. It
+is still described as "triggered just after the command was handed over to the serial connection,"
+which is exactly the metering point needed. Run
+[`octoscanner`](https://github.com/jacopotediosi/octoscanner) against the tree in CI as a guard.
+
+### C-7: Filament DB auth is opt-in bearer
+
+Unauthenticated by default; when `FILAMENTDB_API_KEY` is set on the server, **every** `/api` request
+needs `Authorization: Bearer <key>`. The plugin must support an optional key and store it as a
+`SettingsPlugin` secret so it is redacted from the settings API.
+
+---
+
+## Architecture
+
+### Component layout
+
+```
+octoprint_filamentdb/
+├── __init__.py                 — plugin entry point, mixins, hook registration
+├── plugin.py                   — FilamentDBPlugin: mixin composition, lifecycle
+├── api.py                      — SimpleApiPlugin + BlueprintPlugin endpoints
+├── settings_keys.py            — settings key constants (one place, no string literals)
+├── client/
+│   ├── filamentdb.py           — requests-based FDB REST client (sync; OctoPrint is threaded)
+│   └── models.py               — dataclasses for the FDB shapes the plugin reads
+├── metering/
+│   ├── odometer.py             — per-tool extrusion accumulator (E-move state machine)
+│   ├── convert.py              — mm→g conversion, density fallback, rounding
+│   └── gcode_meta.py           — slicer config-block parser (PS/Orca/Bambu/Cura)
+├── job.py                      — print lifecycle: start/pause/resume/terminal → commit
+├── journal.py                  — durable SQLite store: every job, every write attempt (FR-9b)
+├── retry.py                    — retry policy over journal rows in retryable states (FR-9)
+└── static/
+    ├── js/filamentdb.js        — Knockout viewmodels (sidebar, tab, settings)
+    ├── css/filamentdb.css
+    └── ...
+templates/
+├── filamentdb_sidebar.jinja2
+├── filamentdb_tab.jinja2
+└── filamentdb_settings.jinja2
+```
+
+### Mixins used
+
+| Mixin | Purpose |
+|---|---|
+| `SettingsPlugin` | config, `get_settings_defaults`, `get_settings_restricted_paths` for the API key |
+| `AssetPlugin` | JS/CSS |
+| `TemplatePlugin` | sidebar + tab + settings templates |
+| `SimpleApiPlugin` | `GET`/`POST` plugin API for spool list, select, clear, test-connection |
+| `EventHandlerPlugin` | `PrintStarted`, `PrintPaused`, `PrintResumed`, `PrintDone`, `PrintFailed`, `PrintCancelled`, `FileSelected` |
+| `StartupPlugin` | connectivity probe, resume any pending commit from disk |
+
+### Hooks used
+
+| Hook | Purpose |
+|---|---|
+| `octoprint.comm.protocol.gcode.sent` | the odometer — every command actually sent to the printer |
+| `octoprint.access.permissions` | declare `FILAMENTDB_SELECT` and `FILAMENTDB_ADMIN` |
+
+### Data flow — the happy path
+
+```
+1. User opens the FilamentDB tab, picks a spool for Tool 0 (and Tool 1..N on multi-tool).
+   → plugin stores {toolIdx: {filamentId, spoolId, ...cached display fields}} in settings.
+
+2. User selects a G-code file.
+   → FileSelected: read the tail of the file, parse the slicer config block.
+   → Compare parsed filament_type[] against the loaded spools' `type`.
+   → Compare parsed filament used [g][] against each spool's remaining grams.
+   → Surface warnings in the sidebar (non-blocking) / block the print (if configured).
+
+3. User starts the print.
+   → PrintStarted: reset the odometer, snapshot the loaded-spool assignment for this job
+     (so a mid-print reassignment cannot retroactively rewrite where the filament came from).
+
+4. Every command sent.
+   → gcode.sent: odometer consumes G0/G1/G2/G3 E values, honouring M82/M83/G90/G91/G92 and
+     T<n> tool changes. Accumulates mm per tool index.
+
+5. Print reaches a terminal state (PrintDone / PrintFailed / PrintCancelled).
+   → Convert per-tool mm → grams using each assigned spool's diameter + density.
+   → Build ONE print-history payload with a usage[] entry per tool that has both an assigned
+     spool and non-zero grams.
+   → POST /api/print-history. Filament DB debits the spools and records the job atomically.
+   → On failure: persist to the commit queue and retry (FR-9).
+```
+
+### Why an odometer rather than slicer totals or progress-scaling
+
+Three candidate approaches were considered:
+
+| Approach | Verdict |
+|---|---|
+| Read `filament used [g]` from the slicer block and post it on completion | **Rejected.** Slicer-specific (Cura gives no grams), and yields *nothing usable* on a cancelled print — the single most important case in the brief. |
+| Scale the slicer/analysis total by OctoPrint's print progress fraction | **Rejected.** Progress is `filepos`-based, and G-code density per byte is wildly non-uniform (a dense infill region and a sparse travel region occupy similar byte counts). Error on a cancel is easily ±30%. |
+| Software odometer on actual E-moves | **Adopted.** Slicer-agnostic, exact to what was really extruded, correct on cancel/failure/pause, and per-tool for free. |
+
+The cost is that the odometer must correctly model extrusion state — this is the highest-risk
+component in the plugin and gets the heaviest test coverage (FR-5).
+
+---
+
+## Codebase design constraints (agent navigability)
+
+This project is built primarily by AI coding sessions with a fresh context each time. **The cost
+of a change is dominated by how much an agent must read before it can safely edit.** That makes
+navigability a real architectural constraint, not a style preference — it is written here so it
+governs design reviews rather than being retrofitted by an audit later.
+
+The failure mode to avoid is concrete and observable in `filament-bridge`: a `core/engine.py` with
+line references past 4,200. Fixing twenty lines there means loading four thousand into context
+first. This project bakes in the fix from the start.
+
+**N-1: One concern per module, with a hard size cap.** 300 lines soft, **500 lines hard**. A module
+crossing the hard cap gets split in the same change that crossed it — never "later." If a natural
+split isn't obvious, that is itself the signal the module owns too many concerns.
+
+**N-2: Every module opens with a docstring saying what it owns and what it does *not*.** A grep hit
+should tell an agent within five seconds whether this is the right file. Example:
+
+```python
+"""Per-tool extrusion accumulator.
+
+OWNS: E-move state machine — M82/M83, G90/G91, G92 resets, T<n> tool changes,
+      G0/G1/G2/G3 E deltas. Pure: G-code strings in, {tool_index: millimetres} out.
+DOES NOT OWN: mm→gram conversion (metering/convert.py), what to do with the
+      totals (job.py), or anything network-facing.
+"""
+```
+
+**N-3: Strict layering, enforced by an import-direction test.**
+
+```
+client/     — HTTP + Filament DB shapes.        Imports: nothing internal.
+metering/   — G-code parsing + arithmetic.      Imports: nothing internal.
+journal.py  — durable SQLite store (FR-9b).     Imports: nothing internal.
+retry.py    — retry policy over journal rows.   Imports: journal.py, client/.
+job.py      — orchestration.                    Imports: all of the above.
+api.py      — plugin REST endpoints.            Imports: journal.py, job.py.
+plugin.py   — OctoPrint wiring.                 Imports: job.py, api.py.
+```
+
+`metering/` must never import `client/`, and `journal.py` — pure storage — must import neither. The
+payoff is a guarantee, not a guideline: **a G-code metering bug cannot possibly require reading the
+API client**, so an agent can correctly ignore it. A unit test asserts the import directions so the
+property can't erode.
+
+**N-4: The core is pure functions.** Odometer, mm→g conversion, slicer-block parser, and
+commit-payload builder take plain values and return plain values — no OctoPrint imports, no network,
+no settings object. An agent fixing a conversion bug reads `convert.py` and `test_convert.py` and
+nothing else. This is also why these components can carry heavy test coverage cheaply.
+
+**N-5: `plugin.py` is wiring only — no logic.** The mixin class registers hooks and delegates. The
+moment a decision is made inside a mixin method, it belongs in a module the tests can reach without
+booting OctoPrint. God objects are how the 4,000-line file happens.
+
+**N-6: Constants live in exactly one place.** Settings keys in `settings_keys.py`, no string
+literals at call sites. Same for event names and API paths. "Where is this key used?" must be one
+grep with zero false positives.
+
+**N-7: Tests mirror source paths 1:1.** `metering/odometer.py` → `tests/test_odometer.py`. Fixing a
+bug means reading exactly two files.
+
+**N-8: A task→file routing table lives in `CLAUDE.md`** and is updated in the same commit as any
+structural change. This is the highest-leverage item on the list: it converts "search the repo" into
+"read two files." It is the first thing a fresh session consults after the session brief.
+
+**N-9: Docs are split by *when you read them*, and capped.**
+
+| Doc | Read when | Cap |
+|---|---|---|
+| `prompts/startnewsession.md` | first thing, every session | ~200 lines |
+| `CLAUDE.md` | every session, as reference | ~200 lines |
+| `docs/prd.md` | designing or implementing a feature | uncapped (it's the spec) |
+| `docs/decisions.md` | before re-deriving a design | append-only |
+
+`CLAUDE.md` must not grow into a second PRD. When it drifts toward the cap, the content moves to the
+PRD and `CLAUDE.md` keeps a pointer. The session brief is a *state* document — what's in flight —
+not a knowledge dump.
+
+**N-10: Errors name their origin.** Log lines and exceptions carry the module and the operation, so
+a traceback routes to the right file without a search.
+
+---
+
+## Functional requirements
+
+### P0 — must ship in v1
+
+#### FR-1: Connect to Filament DB
+
+- Settings: **Filament DB URL** (scheme + host + port), optional **API key**, connection timeout.
+- The API key is registered in `get_settings_restricted_paths()` so it is never returned by the
+  settings API to a non-admin and never lands in a support bundle.
+- A **Test connection** button probes `GET /api/openapi` and reports the resolved `info.version`
+  (Filament DB has no dedicated health or version endpoint — this is the documented workaround
+  already used by `filament-bridge`).
+- Startup probe runs once, non-blocking; failure is surfaced in the sidebar as a degraded state,
+  never as an exception that breaks OctoPrint startup.
+
+#### FR-2: Browse and select spools
+
+- `GET /api/filaments` fetches all filaments with embedded spools; the plugin flattens to a spool
+  list client-side (C-3).
+- Cached in memory with a configurable TTL (default 5 min) and a manual **Refresh** button. A
+  library of a few hundred filaments is a single request; no pagination exists to use.
+- Picker columns: colour swatch, vendor, name, material type, remaining grams, location, label,
+  lot number. Sortable; free-text filter across vendor/name/type/label.
+- **Retired spools are hidden by default**, with a toggle to show them (mirrors the Spoolman
+  plugin's archived-spool behaviour).
+- Selection is per tool index. Assignment is stored in settings as:
+
+  ```yaml
+  plugins:
+    filamentdb:
+      selectedSpools:
+        "0":
+          filamentId: "665f…"
+          spoolId: "665f…"
+          # cached for offline display only — authoritative values come from the API
+          display: { vendor: "Prusament", name: "PLA Galaxy Black", type: "PLA", color: "#1a1a2e" }
+  ```
+
+- **Clear** removes the assignment for a tool. A tool with no assignment is metered but its usage
+  is discarded at commit time (with a log line), never guessed at.
+
+#### FR-3: Multi-tool and MMU awareness
+
+**Validated 2026-08-01 — an earlier draft of this requirement was wrong.** It derived the slot
+count from the printer profile alone. That is not safe, for two independent reasons.
+
+**Finding 1: the MMU tool count is manual user configuration, and nothing enforces it.**
+OctoPrint learns an MMU has 5 tools only because the user set **Number of extruders = 5** and
+ticked **Shared nozzle** in the printer profile. Prusa's own OctoPrint documentation instructs
+this. It is not auto-detected, and — verified against
+[`jukebox42/Octoprint-PrusaMMU`](https://github.com/jukebox42/Octoprint-PrusaMMU) — the MMU plugin
+**does not set it either**; that plugin works at the G-code and firmware-message level (intercepting
+`Tx`, parsing `MMU2:` responses) and never touches the profile. So a working MMU setup can easily
+report `extruder.count = 1` while the G-code drives `T0`–`T4`. Silently rendering one slot and
+charging five tools' filament to it would be a data-corruption bug, not a UI annoyance.
+
+**Finding 2: another plugin can suppress the tool-change command before the odometer sees it.**
+A handler on `octoprint.comm.protocol.gcode.queuing` may return `None,` to suppress a command
+entirely, and a **suppressed command never reaches the `gcode.sent` phase**. `Octoprint-PrusaMMU`
+does exactly this on MK3s — it intercepts `Tx` and holds it behind a modal instead of sending it.
+An odometer that infers the active tool purely from observed `Tx` commands can therefore miss a
+tool change and charge the wrong spool.
+
+Requirements that follow:
+
+- **Slot count is the union of three sources**, not the profile alone:
+  1. `self._printer_profile_manager.get_current_or_default()["extruder"]["count"]`
+  2. tool indices present in OctoPrint's analysis metadata (`analysis.filament.tool0…toolN`)
+  3. the per-extruder array length in the slicer config block, when present
+- **When the G-code uses more tools than the profile declares, render the larger number and warn
+  prominently**, naming the fix ("your printer profile says 1 extruder but this file uses 5 tools —
+  set Number of extruders to 5 and tick Shared nozzle"). Never silently collapse tools.
+- **Track the active tool defensively.** Maintain the odometer's tool index from observed `Tx`, but
+  reconcile it against OctoPrint's own current-tool state rather than trusting the command stream
+  as the sole source. Log a warning when the two disagree.
+- **Cross-check per-tool attribution at commit time.** When the slicer block supplies a per-extruder
+  `filament used [mm]` array, compare the odometer's per-tool distribution against it. If the
+  **total** agrees but the **per-tool split** does not, tool attribution broke — warn the user and
+  record the discrepancy in the print-history `notes` rather than writing a confidently wrong split.
+- `extruder.sharedNozzle` is read and displayed, because it changes what the numbers mean: on a
+  shared nozzle, tool-change purge is attributed to whichever tool is active at the time of the
+  purge. That is physically correct, but users should see that purge waste lands on a tool rather
+  than being tracked separately.
+- Profile changes at runtime re-render the slots. Assignments for tool indices that no longer exist
+  are retained in settings (not deleted) but hidden, so downgrading and re-upgrading a profile does
+  not silently lose them.
+
+**Verification targets** (these are acceptance tests, not assumptions):
+
+1. A 5-tool shared-nozzle profile renders 5 slots, and `T3` in the stream routes extrusion to
+   slot 3.
+2. A **1-extruder profile** printing a 5-tool MMU file renders 5 slots **and** raises the profile
+   warning.
+3. With `Octoprint-PrusaMMU` installed on an MK3s-style flow, tool attribution is still correct —
+   or, if it cannot be, the cross-check fires. **This needs testing against a real MMU3 setup;
+   the virtual printer cannot reproduce the plugin's `Tx` interception.**
+
+#### FR-4: Pre-print validation
+
+Triggered on `FileSelected` and re-run whenever a spool assignment changes while a file is selected.
+
+Reads, in priority order:
+
+1. **Slicer config block** — the tail of the G-code file. PrusaSlicer, SuperSlicer, OrcaSlicer and
+   Bambu Studio append `; key = value` lines at end-of-file:
+   - `filament_type` — per-extruder, e.g. `PLA;PETG`
+   - `filament used [g]`, `filament used [mm]`, `total filament used [g]`
+   - `filament_settings_id` — the preset *name*
+   Only the last ~64 KB of the file is read; the block is at the end and files can be hundreds of MB.
+2. **OctoPrint's own analysis metadata** — `_file_manager.get_metadata()` gives
+   `analysis.filament.tool0.length` (mm) and `.volume` (cm³), computed by OctoPrint from E-moves
+   regardless of slicer. This is the universal fallback for the sufficiency check.
+
+Checks performed:
+
+| Check | Requires | Behaviour |
+|---|---|---|
+| **No spool assigned** | — | Warn per unassigned tool that the G-code actually uses. |
+| **Material mismatch** | slicer block | Warn when `filament_type[n]` ≠ the assigned spool's `type` (case-insensitive, trimmed). |
+| **Insufficient filament** | slicer block *or* analysis | Warn when required grams exceed the spool's remaining **net** filament, minus a configurable safety buffer (default 0 g). Use Filament DB's own `spool-check` endpoint — see below. |
+| **Filament DB unreachable** | — | Warn that usage will not be recorded. |
+
+**Cura emits no material type** (a declined upstream feature request), so the mismatch check simply
+does not fire for Cura-sliced files. The sufficiency check still works via the analysis fallback.
+The UI must say *why* a check was skipped rather than showing a silent pass — a green tick that
+means "not checked" is worse than no tick.
+
+Each check is individually toggleable, and each has a **warn / block** mode (default: warn). Block
+mode refuses the print via the print-start path and raises a clear notification.
+
+**Use `GET /api/filaments/:id/spool-check?weight=N` rather than computing net remaining locally.**
+Filament DB's own endpoint already handles three things the plugin would otherwise reimplement and
+get wrong:
+
+- **gross → net conversion** (`remainingWeight = spool.totalWeight − filament.spoolWeight`)
+- **variant inheritance of the tare** — variants typically store `spoolWeight: null` and inherit it
+  from the parent; reading `filament.spoolWeight` directly returns null and silently skips the check
+- **null-tare and retired-spool guards**, plus a ready-made human-readable `warning` string
+
+It returns `{ok, requiredWeightG, requiredLengthM, spools:[{label, remainingWeightG, enough}]}`.
+The local analysis fallback is still needed to *derive* the required grams when the slicer block is
+absent, but the sufficiency comparison itself should be the server's answer.
+
+**Block mode must stay off by default**, and the over-usage case in FR-7 is why: Filament DB's
+recorded weight is an estimate, so "not enough filament" is frequently wrong in the user's favour.
+
+#### FR-5: Extrusion metering (the odometer)
+
+A per-tool accumulator fed by `octoprint.comm.protocol.gcode.sent`, tracking millimetres of
+filament advanced per tool index.
+
+State it must model correctly:
+
+- **`G0` / `G1`** — linear moves; take the `E` parameter.
+- **`G2` / `G3`** — arc moves; also carry `E`. (Called out explicitly in
+  [filament-db#1039](https://github.com/hyiger/filament-db/issues/1039); a naive implementation that
+  only handles `G0`/`G1` silently under-counts on arc-heavy G-code.)
+- **`M82` (absolute) / `M83` (relative)** extrusion mode, and the fact that `G90`/`G91` set the
+  *positioning* mode which on some firmwares also governs E. Track both and resolve per firmware
+  convention, defaulting to Marlin behaviour.
+- **`G92 E<n>`** — resets the extruder origin without extruding. A missed `G92` in absolute mode
+  produces a single enormous phantom extrusion; this is the classic failure mode of naive odometers.
+- **`T<n>`** — tool change; subsequent extrusion accrues to the new tool index.
+- **Retractions** — negative deltas. Net accumulation, not absolute value, so a retract/prime pair
+  nets to zero.
+- **Never count** commands the plugin itself or another plugin injects outside the print stream.
+  Filter on the printing state, not merely on receiving the hook.
+
+**Known interaction risk — another plugin can hide a command from the odometer.** A handler on
+`octoprint.comm.protocol.gcode.queuing` may suppress a command by returning `None,`, and a
+suppressed command **never reaches the `gcode.sent` phase**. `Octoprint-PrusaMMU` does this to `Tx`
+on MK3s-style setups. The consequence is tool-attribution error, not total error — the E-moves
+still arrive, they are just charged to the wrong tool. Mitigations are specified in FR-3
+(defensive active-tool tracking plus a per-tool cross-check against the slicer's per-extruder
+array at commit time).
+
+Non-goals for the odometer in v1: volumetric extrusion (`M200`), firmware retraction (`G10`/`G11`),
+and per-extruder-multiplier compensation (`M221`). Each is logged as an unsupported-command warning
+once per print so the user knows the count may be off, rather than silently producing wrong data.
+
+**Testing.** This component is pure and deterministic — a list of G-code strings in, a dict of
+per-tool millimetres out. It gets a fixture-driven unit test suite with real sliced files
+(PrusaSlicer single-tool, PrusaSlicer 5-tool MMU, OrcaSlicer, Cura, an arc-heavy file), each with a
+hand-verified expected total cross-checked against the slicer's own `filament used [mm]`. Agreement
+within ~1% of the slicer's figure is the acceptance bar; systematic disagreement means the state
+machine is wrong.
+
+#### FR-6: mm → grams conversion
+
+```
+volume_mm3 = π × (diameter_mm / 2)² × length_mm
+grams      = volume_mm3 / 1000 × density_g_cm3
+```
+
+Sanity check: 1000 mm of 1.75 mm filament at 1.24 g/cm³ → 2.98 g. Cross-checked against Filament
+DB's own `spool-check` endpoint, which reports 42.5 g ≡ 14.03 m (3.03 g/m) — consistent.
+
+Inputs come from the **filament** document of the assigned spool: `diameter` (always present,
+defaults to 1.75) and `density` (**nullable** — C-4).
+
+Density fallback chain, in order:
+
+1. The filament's own `density`.
+2. A per-material-type default from a settings map (`PLA: 1.24, PETG: 1.27, ABS: 1.04, ASA: 1.07,
+   TPU: 1.21, PA: 1.14, PC: 1.20`), matched on the filament's `type`.
+3. A global fallback density setting (default 1.24).
+
+When the fallback is used, the plugin: logs it, shows a one-time warning in the sidebar naming the
+filament, and appends a note to the print-history record stating the density was estimated. The
+user should be nudged to fix the record in Filament DB rather than have an estimate quietly become
+permanent inventory truth.
+
+The list projection from `GET /api/filaments` includes `density` but the presence of `diameter` in
+that projection is **unverified** — if absent, the plugin fetches `GET /api/filaments/:id` for each
+*assigned* filament only (never for the whole library) and caches it. This is a to-confirm item
+against a live instance, not a blocker.
+
+##### Precision and rounding
+
+**The rule that matters for correctness: never round an intermediate value.** The odometer
+accumulates millimetres as full-precision floats and the conversion to grams happens **once**, at
+commit time, on the final per-tool total. Rounding per G-code command and then summing would
+accumulate error across the hundreds of thousands of moves in a real print — a genuine bug, not a
+cosmetic one.
+
+Rounding therefore happens at exactly two boundaries:
+
+| Boundary | Precision | Rationale |
+|---|---|---|
+| **Wire** — `grams` in the print-history payload | **3 decimal places** | ≈ 1 mm of 1.75 mm filament. Finer than any real accuracy in the system. |
+| **UI** — sidebar, toasts, pre-print checks | **2 decimal places** | 0.01 g ≈ 3 mm of filament; more digits is false precision on screen. |
+
+**Why round on the wire at all rather than sending the raw float.** The physical accuracy of this
+measurement is nowhere near float precision: filament diameter tolerance alone is roughly ±0.02 mm
+on 1.75 mm stock, which is ±2–3 % on volume, and Filament DB's `density` values carry two or three
+significant figures. A committed value of `12.399999999999999` claims precision the system does not
+have by several orders of magnitude, and it lands in Filament DB's stored `totalWeight` and usage
+history where a user reads it. Rounding to 3 dp discards at most 0.0005 g per usage entry — around
+0.00005 % of a 1 kg spool, unbiased, and utterly swamped by the diameter tolerance. The
+readability is worth vastly more than the precision given up.
+
+Related numeric rules:
+
+- **Comparisons use unrounded values.** The pre-print sufficiency check (FR-4) compares full
+  precision; only the number *displayed* is rounded.
+- **Clamp each usage entry at 0 before sending.** A tool whose net extrusion is negative — possible
+  in principle for a tool that only ever retracted — would produce a negative `grams`, which
+  Filament DB rejects with a `400`. Because the whole payload is one transactional request, that
+  single bad entry would fail the commit for **every** tool and lose the entire job's usage. Clamp
+  per entry, and log when a clamp fires since it indicates an odometer state bug.
+- **Guard against negative zero.** `-0.0` must serialize as `0`, not `-0`.
+
+#### FR-7: Commit usage to Filament DB
+
+Fires once per print, at the terminal state.
+
+Trigger events: `PrintDone`, `PrintFailed`, `PrintCancelled`. **`PrintPaused` does not commit** —
+this deliberately differs from the Spoolman plugin, which commits on pause. Filament DB's unit of
+record is a *job*, and committing at each pause would fragment one physical print into several
+`PrintHistory` documents. The odometer accumulates across pause/resume and commits once.
+
+`PrintPaused` is still handled, but only to **record a changeover marker** (per-tool odometer
+snapshot + timestamp) and persist it with the job state — see FR-12. v1 does not act on markers
+beyond noting the pause count in the record's `notes`.
+
+**Cancel produces `PrintCancelled` followed by `PrintFailed`.** A `last_print_cancelled` flag
+suppresses the duplicate, exactly as the Spoolman plugin does. Without it every cancelled print
+double-commits.
+
+Payload:
+
+```jsonc
+POST /api/print-history
+{
+  "jobLabel":  "benchy_0.2mm_PLA_MK4.gcode",   // truncated to 200 chars
+  "printerId": "<optional, from settings>",     // v1: usually unset
+  "startedAt": "2026-08-01T10:00:00Z",
+  "source":    "other",                         // C-5 — no "octoprint" enum value yet
+  "notes":     "OctoPrint FilamentDB v1.0.0 · result: cancelled at 41% · density estimated for T1",
+  "usage": [
+    { "filamentId": "665f…", "spoolId": "665f…", "grams": 12.4 },
+    { "filamentId": "665f…", "spoolId": "665f…", "grams": 3.1 }
+  ]
+}
+```
+
+Rules:
+
+- **One `usage[]` entry per tool** that has an assigned spool *and* non-zero metered grams. Tools
+  with no assignment are dropped, with a log line naming the discarded grams.
+- **Assignments are snapshotted at `PrintStarted`**, not read at commit time. Reassigning a spool
+  mid-print must not retroactively change where the already-consumed filament is charged.
+- If two tools resolve to the **same spool**, their grams are summed into one entry. Sending two
+  entries for the same spool works but produces a confusing double row in the FDB usage history.
+- **Skip the POST entirely** when total metered grams across all assigned tools is zero (e.g. a
+  print cancelled before the first extrusion). API constraints require 1–100 usage entries.
+- **Grams are rounded to 3 decimal places and clamped at 0** — see FR-6 §Precision and rounding.
+  Summing for the same-spool case happens on unrounded values; rounding is applied once, last.
+- **Never cap the committed grams at what the spool supposedly holds** — see §Over-usage below.
+- Constraints to respect: `jobLabel` ≤ 200 chars; 1–100 usage entries; `grams` non-negative and
+  ≤ the server's `MAX_USAGE_GRAMS`; `notes` ≤ 2000 chars.
+- On success, fire a plugin event and push the updated spool weights to the sidebar.
+
+##### Over-usage — printing more than the spool is recorded as holding
+
+A routine, expected case, not an error: Filament DB's stored weight is an **estimate** that drifts
+from reality (spools are rarely reweighed, tare values are nominal, manufacturers overfill). A job
+needing 25 g on a spool recorded as having 24 g left will usually print fine.
+
+Worked example, tare 200 g:
+
+| Step | Value |
+|---|---|
+| stored `spool.totalWeight` (gross) | 224 g |
+| displayed remaining (net = gross − tare) | 24 g |
+| job consumes | 25 g |
+| Filament DB writes `max(0, 224 − 25)` | 199 g |
+| displayed remaining `max(0, 199 − 200)` | **0 g** ✓ |
+
+**The desired outcome — the spool shows empty — happens natively.** Both the print-history and
+usage routes clamp with `Math.max(0, …)`, and `spool-check` clamps the derived net at 0 as well.
+No special handling is needed to make the spool read 0.
+
+Requirements:
+
+- **Commit the full metered grams. Never cap the value at the spool's recorded remaining.** The
+  usage record must state what was physically extruded. Capping it at 24 g would understate real
+  consumption, silently corrupt the material-cost picture, and destroy the only signal that the
+  stored weight was wrong.
+- **Detect the overshoot and surface it**, since it is genuinely actionable: *"Committed 25.000 g to
+  spool `Galaxy Black #3`. It was recorded as holding 24.0 g and is now empty — 1.0 g over. The
+  recorded weight was low; reweigh the spool or mark it retired."* Also add it to the
+  print-history `notes`.
+- **Do not auto-retire the spool.** A spool reading 0 may still have usable filament, and retiring
+  is a user decision. Offer it as a one-click action in the toast instead.
+- **The overshoot grams are charged nowhere**, which is the correct outcome — the filament came off
+  this spool and the spool is now empty. Do not attempt to spill the excess onto another spool.
+
+**Known upstream wart (documented, not worked around).** Because the clamp floors the **gross** at
+0 rather than at the tare, the stored `totalWeight` above ends at 199 g — 1 g less than an empty
+reel physically weighs. The displayed net is unaffected (`spool-check` re-clamps at 0), so this is
+cosmetic in Filament DB itself, but a below-tare gross can propagate oddly to anything else reading
+that field. v1 deliberately does **not** issue a corrective `PUT` to set `totalWeight = tare`:
+that would be a second, non-transactional write outside the C-1 single-write rule, and a partial
+failure between the two would be worse than the wart. Filed as an upstream suggestion instead —
+floor at `spoolWeight` when the tare is known, falling back to 0 when it is null.
+
+#### FR-8: Result reporting in the UI
+
+- Sidebar shows, per tool: colour swatch, vendor + name, remaining grams, a low-stock indicator
+  driven by the filament's `lowStockThreshold`, and live metered grams during a print. All
+  displayed grams use **2 decimal places** (FR-6 §Precision and rounding).
+- After a commit: a toast naming the job, the grams committed per spool, and a deep link to the
+  record in Filament DB (`{FILAMENTDB_URL}/filaments/{filamentId}` — Filament DB has **no
+  standalone spool page**, so spool links point at the parent filament).
+- On commit failure: a persistent (non-auto-dismissing) error with the reason and the pending-retry
+  state. Losing usage silently is the worst possible failure for this plugin.
+
+#### FR-9: Durable write queue and retry policy
+
+OctoPrint restarting, the host losing power, or Filament DB being down at the moment a print ends
+must not lose the usage record.
+
+- The odometer's per-tool totals and the snapshotted assignment are persisted to the journal
+  (FR-9b) **periodically during the print** (default every 60 s and on every tool change) and on
+  every terminal event.
+- **There is no separate queue store.** "The queue" is a query over journal rows in a retryable
+  state. A standalone pending-commit file plus a job log would be two sources of truth for the same
+  fact, and they would drift.
+- On startup, any row left `pending` or in a retryable failure state is picked up and surfaced.
+- Automatic retry is **bounded and conservative**: retry only on errors that are unambiguously
+  pre-write — connection refused, DNS failure, HTTP 5xx *before* any response body, request-level
+  timeout with no bytes sent. Exponential backoff, capped attempt count.
+- **A timeout *after* the request was sent is never auto-retried.** Filament DB has no idempotency
+  key, so a blind retry risks double-debiting a job that actually landed. These are parked as
+  `failed_ambiguous` for the user to resolve, with a deep link to Filament DB's print history so
+  they can see whether the job recorded.
+
+  This is a real limitation, and the honest fix is upstream: an idempotency key (or a
+  client-supplied job UUID) on `POST /api/print-history` (upstream ask #2).
+
+- **4xx validation errors are never auto-retried either** — the payload will fail identically.
+  These become `failed_permanent` and need user action.
+
+#### FR-9b: Write journal and job history UI
+
+**This is the plugin's trust surface, and it is a P0 differentiator — not nice-to-have.** The
+common complaint about comparable integrations, including the Spoolman OctoPrint plugin, is that
+they do not tell you what they did. A tracker that fails silently is worse than no tracker at all,
+because you believe your inventory is correct when it is not. Every write this plugin attempts —
+**successful or not** — is recorded and visible.
+
+**Store.** A SQLite database in the plugin data folder (`get_plugin_data_folder()`), via stdlib
+`sqlite3` — no new dependency. Chosen over an append-only JSONL file because rows are *mutated*
+(attempt counts, state transitions, user resolution) and need querying and pagination; JSONL would
+need compaction and would drift.
+
+**One row per job**, recording:
+
+| Field | Notes |
+|---|---|
+| job label, file path | as sent in `jobLabel` |
+| started / ended timestamps, terminal state | done / failed / cancelled |
+| per-tool detail | spool (filament id, spool id, display name), metered mm, computed grams, whether density was estimated |
+| the exact payload sent | verbatim, so it can be replayed or pasted into a bug report |
+| outcome state | see state machine below |
+| attempt count + timestamp and error of each attempt | HTTP status, reason, response body excerpt |
+| Filament DB record id | on success — enables the deep link |
+| warnings raised | density fallback, over-usage overshoot, tool-attribution mismatch, unassigned tools dropped |
+
+**State machine:**
+
+| State | Meaning | Auto-retry? |
+|---|---|---|
+| `pending` | metered, not yet accepted | in flight |
+| `committed` | Filament DB accepted it | — |
+| `failed_retryable` | unambiguously pre-write failure | **yes**, with backoff |
+| `failed_ambiguous` | timeout after send — may or may not have landed | **no** — double-debit risk |
+| `failed_permanent` | 4xx validation error | **no** — will fail identically |
+| `resolved_manually` | user recorded it in Filament DB by hand | — |
+| `discarded` | user chose to drop it | — |
+
+**UI — a "History" section in the plugin tab**, newest first, filterable by state:
+
+- Each row shows job name, date, terminal state, total grams, per-spool breakdown, and outcome.
+- **Failures show the reason inline** — HTTP status and message, not a generic "error". The whole
+  point is that the user can act on it.
+- Per-row actions:
+  - **Retry** — re-attempt the write. On a `failed_ambiguous` row, **confirm first** with a warning
+    that it may already be recorded, plus a deep link to Filament DB's print history to check.
+  - **Mark resolved** — "I recorded this manually," stops the nagging without falsely claiming the
+    plugin wrote it.
+  - **Remove entry** — discard. Confirmed, because it destroys the record of consumed filament.
+  - **Copy payload** — the exact JSON, for manual replay or a bug report.
+  - **Open in Filament DB** — deep link to the created print-history record, on success.
+- **Bulk retry** for all `failed_retryable` rows, for the "Filament DB was down all weekend" case.
+
+**Nagging, deliberately.** A badge on the plugin tab shows the count of unresolved failures, and
+the sidebar carries a persistent warning while that count is above zero. Only `resolved_manually`
+and `discarded` clear it. Silence is the failure mode being designed out.
+
+**Retention.** Keep the last N jobs (default 500, configurable). **Retention never deletes an
+unresolved failure** — only `committed`, `resolved_manually`, and `discarded` rows are eligible for
+pruning. Auto-deleting a failed write the user has not dealt with would recreate the exact problem
+this requirement exists to solve.
+
+**Export.** A "download journal as JSON/CSV" action, so a user can reconcile in a spreadsheet or
+attach it to an issue.
+
+#### FR-10: Permissions
+
+Two plugin permissions via the `octoprint.access.permissions` hook:
+
+- `FILAMENTDB_SELECT` — view spools and assign them to tools, view the write journal, and retry a
+  failed write. Default: granted to Operator.
+- `FILAMENTDB_ADMIN` — change plugin settings (URL, API key, check modes), and **discard or
+  bulk-modify journal entries**. Default: Admin only. Destroying the record of consumed filament is
+  an admin action.
+
+Blanket `admin_permission` is removed in OctoPrint 2.0 (C-6); this is the required replacement, not
+a nice-to-have.
+
+---
+
+### P1 — designed in v1, shipped in 1.1
+
+These are **not built in v1**, but the v1 architecture must not preclude them. Each is called out
+here so the seams exist from the start.
+
+#### FR-11: Filament DB printer slot assignment *(1.1)*
+
+Filament DB models printers with AMS slots and supports assigning a spool to a slot:
+
+```
+GET    /api/printers                      → printers with amsSlots[] and occupancy
+GET    /api/spools/:spoolId/assignment
+PUT    /api/spools/:spoolId/assignment    { printerId, slotId }
+DELETE /api/spools/:spoolId/assignment
+```
+
+**v1 keeps loaded-spool state in OctoPrint only.** Filament DB learns what was used via
+print-history at job end, nothing more.
+
+**Required v1 seams** so 1.1 is additive:
+
+- A **settings toggle** `pushSlotAssignment` (default `false`) is *defined in v1's settings schema*
+  and rendered as a disabled "coming in 1.1" control, so enabling it later needs no settings
+  migration.
+- Settings schema reserves `filamentDbPrinterId` and a `toolSlotMap` (`{ "0": "<slotId>", … }`).
+- All spool assign/clear operations in v1 route through a **single internal choke point**
+  (`assignment.set(tool, spool)` / `assignment.clear(tool)`) rather than writing settings from
+  several call sites. 1.1 adds the FDB write inside that one function.
+- Filament DB's own docs warn AMS slot assignments are "reliable only in single-database
+  deployments" (sync remapping caveat). The 1.1 setting's help text must repeat that warning.
+
+#### FR-12: Mid-print spool change *(1.1)*
+
+Close out the outgoing spool's accumulated grams, prompt for the new spool, and start accruing to
+it — so one job can charge two (or more) spools on the same tool. Requested in
+[filament-db#1039](https://github.com/hyiger/filament-db/issues/1039). The dominant real-world
+trigger is **a spool running out mid-print** and the user loading a replacement.
+
+**Can this be tracked accurately? The metering is exact; the *detection* is the hard part.**
+These are separate problems and conflating them is how this feature gets designed wrong.
+
+**Metering — exact, no estimation involved.** The odometer knows precisely how many millimetres
+were extruded before the changeover boundary and how many after. Splitting a tool's usage between
+the old and new spool is arithmetic on numbers already being tracked, not an approximation. Once
+the boundary is known, accuracy equals the odometer's own accuracy.
+
+**Detection — don't detect the change; record every pause as a candidate boundary.**
+
+The tempting design is to identify a filament change from a specific signal — `M600` in the stream,
+or a particular firmware action command. That is fragile. When the printer's own filament sensor
+fires, **the printer initiates `M600` itself and the command never appears in OctoPrint's outgoing
+stream**, so there is nothing for the odometer to see. Whether the host hears about it depends on
+the firmware emitting an action command, which Prusa historically did not do on runout
+([Prusa-Firmware#805](https://github.com/prusa3d/Prusa-Firmware/issues/805)) and which still varies
+by model and firmware version.
+
+But the host *does* find out that something happened. OctoPrint natively handles the
+`// action:pause` and `// action:paused` commands and pauses the print itself, and the bundled
+Action Command Prompt / Action Command Notification plugins render firmware-initiated dialogs — the
+"unexpected event on the printer" style popup users see on a runout. Whatever the specific signal,
+**the print ends up paused, and OctoPrint fires `PrintPaused`.**
+
+That reframes the problem. The plugin does not need to know *why* the print paused, or to recognize
+any particular firmware dialect. It needs to know *where in the extrusion timeline* a spool change
+could have happened. So:
+
+> **Every pause is a candidate changeover boundary.** On `PrintPaused`, snapshot the odometer's
+> per-tool totals and append a marker `{timestamp, {tool_index: millimetres}}` to the job state.
+
+This is robust by construction across every case that matters, and the cases are broader than MMU:
+
+- a slicer- or user-issued `M600`
+- a firmware-initiated runout
+- **a deliberate mid-print colour change on a single-extruder printer** — the common "pause at
+  layer N, swap filament for lettering or a logo, resume" workflow, whether driven by a slicer
+  pause, an `M601`, a pause-at-layer plugin, or the user simply clicking pause
+- a user pausing for any other reason and swapping a spool while they are there
+
+**No firmware-specific parsing is load-bearing for correctness**, and the feature is explicitly
+*not* MMU-only — a single-tool user doing colour changes benefits from it identically.
+
+**Resolution is a separate, deferrable step.** Because the boundary is already recorded, the user
+does not have to answer anything mid-print:
+
+- **On resume**, offer a dismissible prompt: *"Print paused at 14:32 — did you change a spool?"*
+  with a per-tool picker.
+- **Or at job end, before commit**, present the recorded markers and let the user assign spools to
+  each segment retroactively.
+- **If the user never answers**, nothing changes: the whole job charges to the originally-assigned
+  spools, which is exactly v1 behaviour. **Graceful degradation, never a wrong guess.**
+
+Automatic signals (`M600` seen in the stream, a recognized action command) are then a pure
+*accelerator* — they pre-select "yes, a change happened" on the relevant marker instead of being
+load-bearing for correctness.
+
+**Practical next step for verification:** OctoPrint's Terminal tab shows the raw `// action:…` line
+when a runout fires. Capturing that on the target printer identifies exactly which signal the
+firmware sends, which lets 1.1 pre-fill rather than merely ask. Worth doing during v1 development —
+it costs one runout and nothing else.
+
+**Two accuracy caveats to document rather than fix:**
+
+- On a genuine runout the outgoing spool physically hit zero *before* the change. The odometer's
+  figure for it will slightly overshoot what the spool actually held; Filament DB clamps
+  `totalWeight` at 0, so the spool correctly ends empty and the overshoot grams are simply not
+  charged anywhere. Correct outcome, worth documenting so it is not later reported as a bug.
+- MMU3 handles runout through its own load/unload logic rather than a host-visible `M600`, so the
+  MMU case needs separate verification and may only ever support the manual path.
+
+**v1 seams — record in v1, resolve in 1.1.** Two cheap additions to v1 make 1.1 a UI-only change:
+
+1. **The odometer accumulates into a `(tool_index, assignment_id)` key** rather than a bare tool
+   index, so charging one tool's usage across two spools within a single job is a shape the
+   commit-payload builder already understands.
+2. **Pause markers are recorded in v1 even though v1 cannot resolve them.** `PrintPaused` is
+   already a handled event and the odometer totals are already in memory — appending
+   `{timestamp, {tool: mm}}` to the persisted job state is a handful of lines. The payoff is real:
+   if a runout happens on a v1 install, **the data needed to reconstruct the split already exists**
+   rather than being lost forever.
+
+   v1 additionally notes pauses in the print-history record (e.g. *"print paused 2× — usage may
+   need review"*), so a user who did swap a spool has a visible prompt to correct the record in
+   Filament DB by hand.
+
+#### FR-13: Auto-match spools from G-code *(1.2+)*
+
+Fuzzy-match `filament_settings_id` + vendor + type against Filament DB filaments and pre-select per
+tool. Explicitly deferred: there is **no stable unique filament ID in standard G-code** — no
+Filament DB id, no OpenPrintTag UUID — so this requires a real matcher, which is the hardest part of
+`filament-bridge`. Building it twice is the wrong move.
+
+The better path is to close the identity gap upstream: get the OpenPrintTag UUID or Filament DB id
+injected into the G-code as a comment (via the `hyiger` PrusaSlicer Filament Edition fork, or via
+templated custom filament start-G-code). Then matching is exact and trivial. Worth pursuing in
+parallel with v1 implementation.
+
+---
+
+### Explicit non-goals for v1
+
+- Any Spoolman or `filament-bridge` dependency.
+- Real-time incremental usage commits during a print.
+- Embedding the Filament DB web UI in an OctoPrint tab via iframe (suggested in #1039). It sounds
+  cheap and isn't: Filament DB sets frame-ancestor headers, mixed-content rules bite on HTTPS
+  OctoPrint instances, and the auth story for an iframed app with a bearer key is unpleasant.
+  v1 uses deep links that open in a new tab.
+- NFC / RFID spool identification at the printer.
+- Writing anything to Filament DB other than print-history records.
+- Filament DB → OctoPrint direction (e.g. FDB telling OctoPrint what is loaded).
+- OctoPrint 1.x support.
+
+---
+
+## Development environment
+
+### Topology
+
+```
+┌──────────────────────────────┐     ┌────────────────────────────────┐
+│ octoprint (docker)           │     │ filament-db (existing dev)     │
+│  OctoPrint 2.0.0rc4+         │────▶│  from filament-bridge work     │
+│  virtual printer, 5 tools    │     │  Next.js + MongoDB             │
+│  plugin bind-mounted, -e     │     └────────────────────────────────┘
+└──────────────────────────────┘
+```
+
+The Filament DB side is **already running** from the `filament-bridge` dev environment and is
+reused as-is — it has a realistically-sized library (200+ spools) with variants, retired spools,
+and null-density records, which is far better test data than anything seeded from scratch. The dev
+compose file joins its network rather than standing up a second instance.
+
+### `docker-compose.dev.yml` requirements
+
+- OctoPrint 2.0 RC image. **To verify:** which tag the official `octoprint/octoprint` image
+  publishes for 2.0 RCs (`2.0.0rc4`? `edge`?) — if no RC tag exists, build from the OctoPrint
+  GitHub tag in a small local Dockerfile.
+- Plugin source **bind-mounted and installed editable** (`pip install -e /plugin`) so a container
+  restart picks up Python changes; static JS/CSS changes need only a browser reload.
+- Seeded `config.yaml` so the container comes up connected, with no click-through wizard:
+
+  ```yaml
+  plugins:
+    virtual_printer:
+      enabled: true
+      numExtruders: 5        # exercises the MMU path by default
+      hasBed: true
+  ```
+
+  **To verify against 2.0:** the virtual printer's settings path. OctoPrint 2.0 moved serial
+  handling into the bundled Serial Connector plugin (`plugins.serial_connector.*`), and the virtual
+  printer may have moved with it. The 2.0 docs still document `plugins.virtual_printer.enabled`, but
+  this needs confirming on a live RC container before the compose file is written.
+- A second profile with a **single-extruder** printer profile, for the non-MMU path.
+- Anonymous/pre-seeded OctoPrint user so no first-run setup is needed.
+
+### Test G-code fixtures
+
+Committed under `tests/fixtures/gcode/`, kept small (a few layers each, truncated with the config
+block preserved):
+
+| Fixture | Exercises |
+|---|---|
+| PrusaSlicer, single tool | baseline; config block with type + grams |
+| PrusaSlicer, 5-tool MMU | per-extruder arrays, `T<n>` changes, shared nozzle |
+| OrcaSlicer | config-block dialect differences |
+| Cura | **no** `filament_type` — the skipped-check path |
+| Arc-heavy (`G2`/`G3`) | odometer arc handling |
+| Relative-E (`M83`) + `G92` resets | odometer state machine |
+
+### Test strategy
+
+- **Unit** — odometer (fixture-driven, the heaviest suite), mm→g conversion incl. the density
+  fallback chain, slicer config-block parser per dialect, commit-payload builder (dedupe, drop
+  unassigned, skip-when-zero, field limits).
+- **Integration** — FDB client against a mocked HTTP layer, covering: bearer auth, 401, network
+  failure, and the exact `POST /api/print-history` payload shape.
+- **Manual/E2E** — against the real dev Filament DB: print a fixture on the virtual printer, verify
+  the print-history record and the spool debit; cancel mid-print and verify partial grams; kill the
+  Filament DB container mid-print and verify the commit queue recovers; **run the over-usage case**
+  (a job needing more than the spool's recorded net) and verify the spool displays 0, the full
+  grams were committed uncapped, and the overshoot notice fires.
+- **CI** — lint (`ruff`), unit tests, and `octoscanner` for OctoPrint 2.0 deprecation scanning.
+
+---
+
+## Standards & operating model
+
+This project adopts two internal engineering standards. See [`standards.md`](../standards.md) at
+the repo root for the pinned versions and the links to their definitions.
+
+| Standard | Version | Notes |
+|---|---|---|
+| `handoff-prompt-workflow` | 2.0.0 | Adopted at project start |
+| `release-prep-and-cut` | 1.1.0 | Adopted at project start |
+
+**Operating model.** A central **Opus** planning session owns the design, writes handoff prompts for
+each feature and bug fix into `prompts/`, and spawns subagents to execute them (Opus for
+research/planning prompts, Sonnet for coding prompts). Completed prompts self-update their
+frontmatter and `git mv` into `prompts/done/` or `prompts/failed/`. Ask-before-commit applies — the
+standard's default, no auto-commit deviation.
+
+**Open item — branch strategy.** `release-prep-and-cut` explicitly *composes with*
+`code-checkin-and-pr` and assumes its `dev` → protected-`main` PR flow is in place. That standard
+is **not adopted here**, so `/release-prep` has no defined branch strategy to run against. Two ways
+to resolve: adopt `code-checkin-and-pr @ 1.2.0` as well (what `filament-bridge` and `partfolder3d`
+both do), or record the deviation and define a minimal branch rule directly in this repo's
+`standards.md`. Needs a decision before the first release, not before the first commit.
+
+---
+
+## Open questions
+
+| # | Question | Blocks | Resolution path |
+|---|---|---|---|
+| Q-1 | Does `GET /api/filaments` (list projection) include `diameter`? | FR-6 caching strategy | Query the live dev instance |
+| Q-2 | What image tag publishes OctoPrint 2.0 RCs? | dev env | Check Docker Hub / build from source |
+| Q-3 | Is the virtual printer still at `plugins.virtual_printer.*` in 2.0, or under the Serial Connector? | dev env | Stand up an RC container and read the effective config |
+| Q-4 | Does OctoPrint 2.0 model MMU as `extruder.count=N, sharedNozzle=true`, or is there a new tool abstraction? | FR-3 | Read 2.0 printer-profile source |
+| Q-5 | Exact value of `MAX_USAGE_GRAMS` in Filament DB | FR-7 validation | Read `print-history/route.ts` constants |
+| Q-6 | Does `POST /api/print-history` require `spoolId`, or does omitting it pick a spool automatically? | FR-7 | Source suggests it falls back to the first non-retired spool with weight — confirm and always send `spoolId` explicitly regardless |
+
+## Upstream asks (file as issues)
+
+1. **`hyiger/filament-db`** — add `"octoprint"` to the print-history `source` enum (C-5).
+2. **`hyiger/filament-db`** — accept a client-supplied idempotency key or job UUID on
+   `POST /api/print-history` so a retry after an ambiguous timeout cannot double-debit (FR-9).
+3. **`hyiger/filament-db` #1039** — post this design to the thread. It answers the OP's feature
+   list, and the metering/`G2`/`G3` point in it is a genuinely good catch worth crediting.
+4. **`hyiger/PrusaSlicer` (Filament Edition fork)** — inject the OpenPrintTag UUID or Filament DB id
+   into the G-code config block, which would make FR-13 exact instead of fuzzy.
+5. **`hyiger/filament-db`** — on over-usage, floor `spool.totalWeight` at the filament's
+   `spoolWeight` (tare) rather than at 0, when the tare is known. Today an over-debit can leave a
+   stored **gross** weight below what the empty reel physically weighs (FR-7 §Over-usage). Display
+   is unaffected because `spool-check` re-clamps the derived net at 0, so this is low severity —
+   but the stored field becomes physically impossible, and `spoolWeight` is nullable so the fallback
+   to 0 still needs to exist.
+
+## Success criteria for v1
+
+1. A print on a single-tool printer debits the correct spool in Filament DB, within ~1% of the
+   slicer's reported gram figure, and appears in Filament DB's print history under the job name.
+2. A print cancelled at 40% records roughly 40% of the filament, not 0% and not 100%.
+3. A 5-tool MMU print produces one print-history record with a correct per-spool usage breakdown.
+4. A Cura-sliced print meters correctly and clearly reports that the material-type check was skipped.
+5. Filament DB being unreachable at job end loses no usage — the retry queue recovers it.
+6. **The plugin never fails silently.** Every write attempt is visible in the history UI with its
+   outcome, and a failure the user has not resolved is impossible to miss: it carries a reason, a
+   retry action, and a persistent badge. A user can always answer "did my last print get recorded,
+   and if not, why?" without reading a log file.
+7. The plugin installs and runs clean on OctoPrint 2.0 with no deprecation warnings
+   (`octoscanner` clean).
+
+---
+
+## Sources
+
+- [OctoPrint 2.0.0 plugin migration guide](https://docs.octoprint.org/en/dev/plugins/migration_2_0_0.html)
+- [OctoPrint 2.0 hooks reference](https://docs.octoprint.org/en/dev/plugins/hooks.html)
+- [OctoPrint virtual printer docs](https://docs.octoprint.org/en/dev/development/virtual_printer.html)
+- [OctoPrint 2.0.0 is coming soon](https://octoprint.org/blog/2026/04/20/octoprint-2.0.0-is-coming-soon/) · [rc3](https://octoprint.org/blog/2026/06/23/new-release-candidate-2.0.0rc3/)
+- [octoscanner](https://github.com/jacopotediosi/octoscanner)
+- [mdziekon/octoprint-spoolman](https://github.com/mdziekon/octoprint-spoolman) · [plugin page](https://plugins.octoprint.org/plugins/Spoolman/)
+- [jukebox42/Octoprint-PrusaMMU](https://github.com/jukebox42/Octoprint-PrusaMMU) — `Tx` interception, `MMU2:` firmware-message parsing (FR-3)
+- [Prusa KB — OctoPrint configuration](https://help.prusa3d.com/article/octoprint-configuration-and-install_2182) — MMU needs Number of extruders = 5 + Shared nozzle, set manually (FR-3)
+- [Prusa-Firmware#805](https://github.com/prusa3d/Prusa-Firmware/issues/805) — `// action:pause` not emitted on filament runout (FR-12)
+- [filament-db API docs](https://github.com/hyiger/filament-db/blob/main/docs/api.md) · `src/app/api/print-history/route.ts` · `src/models/Filament.ts`
+- [filament-db#1039 — OctoPrint plugin request](https://github.com/hyiger/filament-db/issues/1039)
+- [Cura: add material used to G-code (declined)](https://github.com/Ultimaker/Cura/issues/10223)
+- `filament-bridge` — `docs/upstream-apis.md`, `backend/app/services/filamentdb.py`
