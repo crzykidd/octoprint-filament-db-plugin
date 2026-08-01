@@ -1,0 +1,41 @@
+# Local development environment.
+#
+#   docker compose -f docker-compose.dev.yml up -d --build
+#   → http://localhost:5000
+#
+# Filament DB is NOT started here. Point the plugin at an existing instance from the
+# plugin's settings page (see README → Development environment).
+#
+# All mutable state lives in ./private_data/, which is gitignored.
+
+services:
+  octoprint:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+      args:
+        # Bump as new RCs land; 2.0 GA will just be "2.0.0".
+        OCTOPRINT_VERSION: 2.0.0rc4
+    image: octoprint-filamentdb-dev:latest
+    container_name: octoprint-fdb-dev
+    ports:
+      - "${OCTOPRINT_PORT:-5000}:80"
+    volumes:
+      # OctoPrint's own volume — config.yaml, uploads, logs, printer profiles, and
+      # the plugin's journal DB. Gitignored so nothing machine-specific is published.
+      - ./private_data/octoprint:/octoprint
+      # Plugin source, for the editable install (see Dockerfile.dev).
+      - ./:/plugin
+    environment:
+      # No webcam in the dev container.
+      ENABLE_MJPG_STREAMER: "false"
+      TZ: "${TZ:-UTC}"
+    restart: unless-stopped
+
+# If your Filament DB dev instance runs in Docker and is not reachable over the LAN,
+# join its network instead of relying on host routing:
+#
+# networks:
+#   default:
+#     name: <filament-db-network>
+#     external: true

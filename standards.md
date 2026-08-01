@@ -12,11 +12,14 @@ project has actually wired up.
 Not adopted:
 
 - [code-checkin-and-pr](https://gitea.crzynet.com/crzynet/homelab-configs/src/branch/main/standards/code-checkin-and-pr/README.md)
-  — **open item, needs a decision before the first release.** `release-prep-and-cut`
-  explicitly composes with this standard and assumes its `dev` → protected-`main` PR flow,
-  commit-prefix conventions, and CI checks are in place. Without it, `/release-prep` has no
-  defined branch strategy to run against. Resolve by either adopting it at `1.2.0` (what
-  `filament-bridge` and `partfolder3d` both do) or defining a minimal branch rule here and
-  recording the deviation.
+  — **partially satisfied in practice; formal adoption still open.** As of 2026-08-01 the repo
+  implements this standard's branch rule directly: work happens on **`dev`**, and **`main` is
+  protected** — PRs required, force-pushes and deletions blocked, `enforce_admins: true` so the
+  owner cannot bypass it either. Conventional-commit prefixes are in use.
+
+  Not yet in place: the required CI checks (lint, tests, SAST/CodeQL, image build) that the
+  standard also mandates, since there is no application code to check. Formally adopt at `1.2.0`
+  once CI exists — that is also what `release-prep-and-cut` assumes, since it composes with this
+  standard.
 - [repo-sandbox-permissions](https://gitea.crzynet.com/crzynet/homelab-configs/src/branch/main/standards/repo-sandbox-permissions/README.md)
   — this environment is not sandbox-provisioned.

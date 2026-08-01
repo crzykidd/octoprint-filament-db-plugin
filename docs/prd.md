@@ -1038,13 +1038,24 @@ reused as-is — it has a realistically-sized library (200+ spools) with variant
 and null-density records, which is far better test data than anything seeded from scratch. The dev
 compose file joins its network rather than standing up a second instance.
 
+All mutable state lives in `private_data/` (gitignored in full) — the OctoPrint volume, scratch
+G-code, keys, notes. Committed test data goes in `tests/fixtures/` instead. Same convention as
+`filament-bridge`.
+
 ### `docker-compose.dev.yml` requirements
 
-- OctoPrint 2.0 RC image. **To verify:** which tag the official `octoprint/octoprint` image
-  publishes for 2.0 RCs (`2.0.0rc4`? `edge`?) — if no RC tag exists, build from the OctoPrint
-  GitHub tag in a small local Dockerfile.
+- **We build our own image — no official one ships OctoPrint 2.0** (Q-2, resolved). `Dockerfile.dev`
+  layers the PyPI RC onto `octoprint/octoprint:latest`.
+
+  **Build-time gotcha, already handled:** the base image sets `PIP_USER=true` with
+  `PYTHONUSERBASE=/octoprint/plugins`, and `/octoprint` is a `VOLUME`. A plain `pip install` lands
+  in the volume and is **shadowed the moment the bind mount attaches at runtime** — the container
+  silently keeps running 1.11.x. The Dockerfile forces `PIP_USER=false` and then asserts
+  `octoprint.__version__` starts with `2.`, so a failed upgrade breaks the build instead of wasting
+  an afternoon.
 - Plugin source **bind-mounted and installed editable** (`pip install -e /plugin`) so a container
-  restart picks up Python changes; static JS/CSS changes need only a browser reload.
+  restart picks up Python changes; static JS/CSS changes need only a browser reload. The editable
+  install is commented out in `Dockerfile.dev` until `pyproject.toml` exists.
 - Seeded `config.yaml` so the container comes up connected, with no click-through wizard:
 
   ```yaml
@@ -1055,10 +1066,10 @@ compose file joins its network rather than standing up a second instance.
       hasBed: true
   ```
 
-  **To verify against 2.0:** the virtual printer's settings path. OctoPrint 2.0 moved serial
-  handling into the bundled Serial Connector plugin (`plugins.serial_connector.*`), and the virtual
-  printer may have moved with it. The 2.0 docs still document `plugins.virtual_printer.enabled`, but
-  this needs confirming on a live RC container before the compose file is written.
+  **Confirmed against a live 2.0.0rc4 container (Q-3).** Despite 2.0 moving serial handling into the
+  bundled `serial_connector` plugin, `virtual_printer` remains a separate bundled plugin with the
+  same settings key and the same `numExtruders` / `hasBed` options, registering port `VIRTUAL`
+  through a serial factory. The snippet above is correct as written.
 - A second profile with a **single-extruder** printer profile, for the non-MMU path.
 - Anonymous/pre-seeded OctoPrint user so no first-run setup is needed.
 
@@ -1123,8 +1134,8 @@ both do), or record the deviation and define a minimal branch rule directly in t
 | # | Question | Blocks | Resolution path |
 |---|---|---|---|
 | Q-1 | Does `GET /api/filaments` (list projection) include `diameter`? | FR-6 caching strategy | Query the live dev instance |
-| Q-2 | What image tag publishes OctoPrint 2.0 RCs? | dev env | Check Docker Hub / build from source |
-| Q-3 | Is the virtual printer still at `plugins.virtual_printer.*` in 2.0, or under the Serial Connector? | dev env | Stand up an RC container and read the effective config |
+| ~~Q-2~~ | ~~What image tag publishes OctoPrint 2.0 RCs?~~ **RESOLVED 2026-08-01: none does.** `octoprint/octoprint:latest` and `:edge` both pin `octoprint_ref=1.11.8`; `:canary` tracks the `maintenance` branch (still 1.x). The 2.0 RCs are on PyPI (rc1–rc4), so `Dockerfile.dev` layers the RC onto the official image. | — | Done |
+| ~~Q-3~~ | ~~Is the virtual printer still at `plugins.virtual_printer.*` in 2.0?~~ **RESOLVED 2026-08-01: yes, unchanged.** Verified on a live 2.0.0rc4 container — `virtual_printer` is still a bundled plugin alongside the new `serial_connector`, still keyed `plugins.virtual_printer.*` with `enabled` / `numExtruders` / `hasBed`, still on port `VIRTUAL` via a serial factory. | — | Done |
 | Q-4 | Does OctoPrint 2.0 model MMU as `extruder.count=N, sharedNozzle=true`, or is there a new tool abstraction? | FR-3 | Read 2.0 printer-profile source |
 | Q-5 | Exact value of `MAX_USAGE_GRAMS` in Filament DB | FR-7 validation | Read `print-history/route.ts` constants |
 | Q-6 | Does `POST /api/print-history` require `spoolId`, or does omitting it pick a spool automatically? | FR-7 | Source suggests it falls back to the first non-retired spool with weight — confirm and always send `spoolId` explicitly regardless |

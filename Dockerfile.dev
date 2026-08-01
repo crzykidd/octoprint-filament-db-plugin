@@ -1,0 +1,28 @@
+# Development image — OctoPrint 2.0 RC on top of the official OctoPrint image.
+#
+# Why this exists: there is NO official image that ships OctoPrint 2.0. Verified
+# 2026-08-01 against Docker Hub — `latest` and `edge` both pin octoprint_ref=1.11.8,
+# and `canary` tracks the `maintenance` branch (still the 1.x line). So the 2.0 RC has
+# to be layered on ourselves. It is published on PyPI (2.0.0rc1 … rc4).
+#
+# This is a DEV image. Do not publish it or use it for anything but local testing.
+
+FROM octoprint/octoprint:latest
+
+ARG OCTOPRINT_VERSION=2.0.0rc4
+
+# GOTCHA: the base image sets PIP_USER=true with PYTHONUSERBASE=/octoprint/plugins,
+# and /octoprint is a VOLUME. A plain `pip install` would therefore land in the volume
+# and be shadowed the moment the bind mount is attached at runtime — the container
+# would silently keep running 1.11.x. Force a system-level install instead.
+RUN PIP_USER=false pip install --no-cache-dir --upgrade "OctoPrint==${OCTOPRINT_VERSION}"
+
+# Fail the build loudly if the upgrade did not take, rather than discovering it
+# after an hour of debugging why a 2.0-only API is missing.
+RUN PIP_USER=false python -c "import octoprint; v=octoprint.__version__; print('OctoPrint', v); assert v.startswith('2.'), f'expected 2.x, got {v}'"
+
+# Once the plugin has packaging (pyproject.toml), install it editable so a container
+# restart picks up Python changes without a rebuild:
+#   RUN PIP_USER=false pip install --no-cache-dir -e /plugin
+# Left commented until packaging exists — an editable install of a directory with no
+# pyproject.toml fails the build.

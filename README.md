@@ -57,6 +57,67 @@ It talks to Filament DB **natively**. It does not require, use, or sync through
 | Python | 3.9+ |
 | Filament DB | a reachable instance; an API key if yours sets `FILAMENTDB_API_KEY` |
 
+## Development environment
+
+A Docker-based OctoPrint 2.0 instance with a virtual printer, so you can develop and test
+without tying up a real printer.
+
+### Why we build our own image
+
+**There is no official Docker image that ships OctoPrint 2.0.** Verified 2026-08-01: the
+`octoprint/octoprint` tags `latest` and `edge` both pin `octoprint_ref=1.11.8`, and `canary`
+tracks the `maintenance` branch — still the 1.x line. The 2.0 release candidates *are* published
+on PyPI, so [`Dockerfile.dev`](Dockerfile.dev) layers the RC on top of the official image and
+asserts at build time that the upgrade actually took.
+
+### Start it
+
+```bash
+git clone https://github.com/crzykidd/octoprint-filament-db-plugin.git
+cd octoprint-filament-db-plugin
+mkdir -p private_data/octoprint
+
+docker compose -f docker-compose.dev.yml up -d --build
+```
+
+OctoPrint comes up on **http://localhost:5000**. Override with `OCTOPRINT_PORT` in a `.env` file
+(gitignored) if 5000 is taken.
+
+### First-run setup
+
+1. Walk the OctoPrint setup wizard and create your user account.
+2. **Connect to the `VIRTUAL` port** — the virtual printer is enabled for you on first start
+   (`plugins.virtual_printer` in `private_data/octoprint/octoprint/config.yaml`, 5 extruders).
+3. **Pick the printer profile that matches what you're testing.** A
+   *Virtual MMU (5 tools, shared nozzle)* profile is pre-created. This matters more than it looks:
+   OctoPrint does **not** detect an MMU's tool count, and neither does the PrusaMMU plugin — see
+   FR-3 in the PRD for why getting it wrong silently mis-attributes filament.
+4. In the plugin's settings, point **Filament DB URL** at your instance and add an API key if it
+   sets `FILAMENTDB_API_KEY`.
+
+To re-seed steps 2–3 from scratch, delete `private_data/octoprint/` and bring the stack back up.
+
+### `private_data/` — local only
+
+Everything mutable lives in `private_data/`, which is **gitignored in full**: the OctoPrint volume
+(config, uploads, logs, the plugin's journal DB), scratch G-code, keys, and notes. Nothing in there
+is needed to build or run from a fresh clone — the container recreates it on first start.
+
+Committed test data belongs in `tests/fixtures/` instead. That includes the real MMU3 serial
+capture at `tests/fixtures/serial/`, which is worth reading before touching the metering code.
+
+### Useful commands
+
+```bash
+docker compose -f docker-compose.dev.yml logs -f octoprint   # follow logs
+docker compose -f docker-compose.dev.yml restart octoprint   # pick up Python changes
+docker compose -f docker-compose.dev.yml up -d --build       # rebuild after an RC bump
+docker compose -f docker-compose.dev.yml down                # stop (keeps private_data/)
+```
+
+Static JS/CSS changes need only a browser reload. Python changes need a container restart, since
+the plugin is installed editable.
+
 ## Documentation
 
 - **[`docs/prd.md`](docs/prd.md)** — the v1 design: requirements, constraints, and architecture.
