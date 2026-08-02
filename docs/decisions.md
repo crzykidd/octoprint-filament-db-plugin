@@ -33,6 +33,39 @@ defensively against OctoPrint's own state, and cross-check the per-tool split at
 against the slicer's per-extruder `filament used [mm]` array — if the total agrees but the split
 does not, warn instead of writing a confidently wrong attribution.
 
+## 2026-08-01 — Q-1…Q-8 resolved; two answers changed requirements
+
+All eight open questions answered against a live OctoPrint 2.0.0rc4 container, the live Filament DB
+dev instance, and upstream source. Full answers are in the PRD's Open questions table. Two were not
+confirmations — they changed the design:
+
+**`M600` is not in OctoPrint's default `pausingCommands`.** The default is `["M0", "M1", "M25"]`
+(`serial_connector/config_schema.py`). So a slicer-emitted `M600`, sitting plainly in the outgoing
+stream, **does not pause OctoPrint at all** on a default install. Combined with Q-7 — `PRINT_PAUSED`
+fires from exactly one place, reachable only by a host pause, an `// action:pause`/`paused`, or a
+`pausingCommands` match — this closes the question the MMU capture opened: pause-based marking is
+not viable as a primary mechanism, and the vendor-neutral stall watchdog is load-bearing.
+
+New requirement from this: the plugin should *detect* that `M600` is missing from `pausingCommands`
+and surface a dismissible hint. It is a real OctoPrint configuration gap that bites people well
+beyond this plugin. **Advise; never silently edit another plugin's settings.**
+
+**`spoolId` is optional on `POST /api/print-history` — which is exactly why it must always be
+sent.** Omitting it makes Filament DB pick `first non-retired spool with totalWeight > 0`, falling
+back to `first non-retired spool`. That is an implicit inventory choice the user never made, on a
+request that debits real weight. The PRD previously said "send it explicitly regardless" on a
+hunch; that hunch is now justified.
+
+Also worth recording, though they only confirmed existing design: `diameter` is absent from the
+Filament DB list projection but present in detail (Q-1), so FR-6's fetch-detail-for-assigned-only
+approach stands; OctoPrint 2.0 introduces **no** new tool abstraction (Q-4), so FR-3 holds;
+`MAX_USAGE_GRAMS` is 1,000,000 g — an overflow backstop that will never fire on a real job (Q-5);
+and `octoprint.comm.protocol.gcode.received` is the hook for `echo:MMU2:` parsing (Q-8).
+
+**Test-data gap found while answering Q-1:** the dev Filament DB has 10 filaments / 7 spools, not
+the 200+ of production, and **every record has a non-null density** — so FR-6's density fallback
+chain is currently untestable there. Seed a null-density record before calling FR-6 verified.
+
 ## 2026-08-01 — A real MMU3 capture disproved the "every pause is a marker" assumption
 
 A live serial capture of an MMU3 runout/jam was taken from hardware and committed as

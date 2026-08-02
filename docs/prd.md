@@ -413,6 +413,11 @@ tool change and charge the wrong spool.
 
 Requirements that follow:
 
+**Confirmed against OctoPrint 2.0.0rc4 (Q-4): the profile model is unchanged.** `printer/profile.py`
+still defines `extruder.{count, offsets, nozzleDiameter, sharedNozzle, defaultExtrusionLength}` with
+defaults `count: 1` and `sharedNozzle: False`, validated `0 < count < 100`. There is no new tool
+abstraction in 2.0, so everything below applies as written.
+
 - **Slot count is the union of three sources**, not the profile alone:
   1. `self._printer_profile_manager.get_current_or_default()["extruder"]["count"]`
   2. tool indices present in OctoPrint's analysis metadata (`analysis.filament.tool0…toolN`)
@@ -585,10 +590,17 @@ filament, and appends a note to the print-history record stating the density was
 user should be nudged to fix the record in Filament DB rather than have an estimate quietly become
 permanent inventory truth.
 
-The list projection from `GET /api/filaments` includes `density` but the presence of `diameter` in
-that projection is **unverified** — if absent, the plugin fetches `GET /api/filaments/:id` for each
-*assigned* filament only (never for the whole library) and caches it. This is a to-confirm item
-against a live instance, not a blocker.
+**Confirmed against a live instance (Q-1): the list projection carries `density` but NOT
+`diameter`.** The full list projection is `_id, color, cost, density, hasCalibrations, hasVariants,
+lowStockThreshold, name, netFilamentWeight, optTags, parentId, secondaryColors, spoolWeight, spools,
+tdsUrl, temperatures, totalWeight, type, vendor`. `diameter` appears only in the detail projection
+(`GET /api/filaments/:id`).
+
+So the plugin fetches detail for **assigned filaments only** — never for the whole library — and
+caches it. In practice that is one request per loaded tool, refreshed on assignment change.
+
+Embedded spools in the list projection carry `_id, instanceId, label, locationId, openedDate,
+purchaseDate, retired, totalWeight` — enough to render the picker (FR-2) without any detail fetch.
 
 ##### Precision and rounding
 
@@ -672,8 +684,13 @@ Rules:
 - **Grams are rounded to 3 decimal places and clamped at 0** — see FR-6 §Precision and rounding.
   Summing for the same-spool case happens on unrounded values; rounding is applied once, last.
 - **Never cap the committed grams at what the spool supposedly holds** — see §Over-usage below.
+- **Always send `spoolId` explicitly** (Q-6). It is *optional* in the API, and that is precisely the
+  hazard: omitting it makes Filament DB silently pick the first non-retired spool with
+  `totalWeight > 0`, falling back to the first non-retired spool. That is an implicit inventory
+  choice the user never made, on a request that debits real weight.
 - Constraints to respect: `jobLabel` ≤ 200 chars; 1–100 usage entries; `grams` non-negative and
-  ≤ the server's `MAX_USAGE_GRAMS`; `notes` ≤ 2000 chars.
+  ≤ `MAX_USAGE_GRAMS` = **1,000,000 g** (Q-5 — a 1-tonne overflow backstop, ~50× the largest spool
+  sold, so it will never fire on a real job); `notes` ≤ 2000 chars.
 - On success, fire a plugin event and push the updated spool weights to the sidebar.
 
 ##### Over-usage — printing more than the spool is recorded as holding
@@ -906,8 +923,29 @@ It shows:
   firmware does everything itself. **OctoPrint is blocked on serial flow control, not paused.**
   From its point of view the print is still `Printing`, just slow.
 
-So **`PrintPaused` cannot be assumed to fire.** Whether it does for this event is still unverified
-(Q-7) and must not be designed around until it is.
+**`PrintPaused` does not fire.** Confirmed by source inspection (Q-7): `PRINT_PAUSED` is emitted
+from exactly one place, `printer/standard.py:1395`, reachable by only three routes — a host-side
+pause, an `// action:pause`/`paused` command handled in `serial_connector/serial_comm.py`, or a
+command matching `pausingCommands`. The capture contains none of them.
+
+**And it is worse than that: `pausingCommands` defaults to `["M0", "M1", "M25"]` — `M600` is not in
+the list.** So even a *slicer-emitted* `M600`, sitting plainly in the outgoing stream, does not
+pause OctoPrint on a default install. The host keeps streaming while the printer runs its change
+sequence.
+
+Two consequences:
+
+1. **Pause-based marking is not a viable primary mechanism.** It works only when the user has
+   explicitly added `M600` to `pausingCommands`, or their firmware emits an action command. Neither
+   can be assumed.
+2. **The plugin should detect and advise.** On startup and at print start, check whether `M600`
+   appears in `plugins.serial_connector.pausingCommands`; if not, surface a one-time,
+   dismissible hint explaining that OctoPrint will not pause on a filament change and offering to
+   add it. This is a genuine OctoPrint configuration gap that bites people well beyond this plugin,
+   and it is cheap to point at. **Advise, never edit another plugin's settings silently.**
+
+Note that the plugin's *own* marking does not depend on any of this: `M600` is visible via
+`gcode.sent` whether or not OctoPrint chooses to pause on it.
 
 What the capture *does* give is a rich, unambiguous inbound signal:
 
@@ -922,10 +960,10 @@ timeline was interrupted."** A changeover marker is recorded on *any* of:
 
 | Signal | Source | Covers |
 |---|---|---|
-| `PrintPaused` / `PrintResumed` events | OctoPrint | host-side pause, slicer `M600` routed through pause commands, user clicking pause |
-| `M600` / `M601` seen outbound | `gcode.sent` | slicer- or user-issued change |
+| `PrintPaused` / `PrintResumed` events | OctoPrint | host-side pause, user clicking pause, **and `M600` only if the user added it to `pausingCommands`** |
+| `M600` / `M601` seen outbound | `octoprint.comm.protocol.gcode.sent` | slicer- or user-issued change — seen regardless of whether OctoPrint pauses |
 | `// action:pause` / `paused` | `octoprint.comm.protocol.action` | firmware that does announce itself |
-| **`echo:MMU2:` state messages** | received-line hook | **Prusa MMU — the case that produced this capture** |
+| **`echo:MMU2:` state messages** | **`octoprint.comm.protocol.gcode.received`** (Q-8) | **Prusa MMU — the case that produced this capture** |
 | **A prolonged outbound stall while `Printing`** | send-timestamp watchdog | **the universal backstop — no firmware dialect needed** |
 
 The last row is the important one. It requires no vendor-specific parsing: if the print state is
@@ -1033,10 +1071,15 @@ parallel with v1 implementation.
 └──────────────────────────────┘
 ```
 
-The Filament DB side is **already running** from the `filament-bridge` dev environment and is
-reused as-is — it has a realistically-sized library (200+ spools) with variants, retired spools,
-and null-density records, which is far better test data than anything seeded from scratch. The dev
-compose file joins its network rather than standing up a second instance.
+The Filament DB side is **already running** from the `filament-bridge` dev environment at
+`http://crzydev.home.arpa:3000` and is reused as-is rather than standing up a second instance.
+
+**Its scale is modest — 10 filaments / 7 spools as of 2026-08-01**, not the 200+ of the production
+instance. That is fine for functional work but **not** a realistic picker-performance or
+matching test. Two gaps it does not currently exercise: every filament there has a non-null
+`density`, so the FR-6 fallback chain needs a deliberately null-density record to test, and there is
+no large library to check the FR-2 cache/TTL behaviour against. Seed both before calling those
+requirements verified.
 
 All mutable state lives in `private_data/` (gitignored in full) — the OctoPrint volume, scratch
 G-code, keys, notes. Committed test data goes in `tests/fixtures/` instead. Same convention as
@@ -1142,16 +1185,19 @@ both do), or record the deviation and define a minimal branch rule directly in t
 
 ## Open questions
 
+**All resolved as of 2026-08-01**, against a live OctoPrint 2.0.0rc4 container, a live Filament DB
+dev instance, and the upstream sources. Kept here as the answer record rather than deleted.
+
 | # | Question | Blocks | Resolution path |
 |---|---|---|---|
-| Q-1 | Does `GET /api/filaments` (list projection) include `diameter`? | FR-6 caching strategy | Query the live dev instance |
+| ~~Q-1~~ | ~~Does `GET /api/filaments` (list projection) include `diameter`?~~ **RESOLVED: no.** Verified against the live instance — the list projection carries `density` but **not** `diameter`; the detail projection (`GET /api/filaments/:id`) has both. So the mm→g conversion must fetch detail for *assigned* filaments only, exactly as FR-6 specifies. | — | Done |
 | ~~Q-2~~ | ~~What image tag publishes OctoPrint 2.0 RCs?~~ **RESOLVED 2026-08-01: none does.** `octoprint/octoprint:latest` and `:edge` both pin `octoprint_ref=1.11.8`; `:canary` tracks the `maintenance` branch (still 1.x). The 2.0 RCs are on PyPI (rc1–rc4), so `Dockerfile.dev` layers the RC onto the official image. | — | Done |
 | ~~Q-3~~ | ~~Is the virtual printer still at `plugins.virtual_printer.*` in 2.0?~~ **RESOLVED 2026-08-01: yes, unchanged.** Verified on a live 2.0.0rc4 container — `virtual_printer` is still a bundled plugin alongside the new `serial_connector`, still keyed `plugins.virtual_printer.*` with `enabled` / `numExtruders` / `hasBed`, still on port `VIRTUAL` via a serial factory. | — | Done |
-| Q-4 | Does OctoPrint 2.0 model MMU as `extruder.count=N, sharedNozzle=true`, or is there a new tool abstraction? | FR-3 | Read 2.0 printer-profile source |
-| Q-5 | Exact value of `MAX_USAGE_GRAMS` in Filament DB | FR-7 validation | Read `print-history/route.ts` constants |
-| Q-6 | Does `POST /api/print-history` require `spoolId`, or does omitting it pick a spool automatically? | FR-7 | Source suggests it falls back to the first non-retired spool with weight — confirm and always send `spoolId` explicitly regardless |
-| Q-7 | **Does OctoPrint fire `PrintPaused` during a firmware-driven MMU filament change?** The serial capture shows no `// action:` command and a stalled send queue, so it may stay in `Printing` the whole time. | FR-12 detection | Reproduce the event with plugin-side event logging, or check OctoPrint's own event log against the capture timestamps. **Until answered, the stall watchdog is the only signal that can be relied on.** |
-| Q-8 | Which OctoPrint hook exposes *received* lines, for `echo:MMU2:` parsing? (`octoprint.comm.protocol.gcode.received` or equivalent in 2.0) | FR-12 detection | 2.0 hooks reference |
+| ~~Q-4~~ | ~~Does OctoPrint 2.0 introduce a new tool abstraction?~~ **RESOLVED: no — the model is unchanged.** `printer/profile.py` still defines `extruder.{count, offsets, nozzleDiameter, sharedNozzle, defaultExtrusionLength}`, defaults `count: 1` / `sharedNozzle: False`, validated `0 < count < 100`. FR-3's model holds as written. | — | Done |
+| ~~Q-5~~ | ~~Exact value of `MAX_USAGE_GRAMS`?~~ **RESOLVED: `1_000_000` g (1 tonne)**, with `MAX_SPOOL_HISTORY = 1000`. It is an overflow backstop, not a unit check — ~50× the largest FDM spool sold. **No practical constraint on a print job**; validate against it anyway, but it will never fire legitimately. | — | Done |
+| ~~Q-6~~ | ~~Does `POST /api/print-history` require `spoolId`?~~ **RESOLVED: it is optional — and that is exactly why we must always send it.** Omitting it makes Filament DB pick `first non-retired spool with totalWeight > 0`, falling back to `first non-retired spool`. That is an implicit choice the user never made. Always send `spoolId` explicitly. | — | Done |
+| ~~Q-7~~ | ~~Does OctoPrint fire `PrintPaused` during a firmware-driven MMU change?~~ **RESOLVED by source inspection: no.** `PRINT_PAUSED` fires from exactly one place (`printer/standard.py:1395`), reachable only via a host-side pause, an `// action:pause`/`paused` command, or a command in `pausingCommands`. The capture has none of the three. **See the `pausingCommands` finding below — it is worse than expected.** | — | Done (hardware confirmation still welcome) |
+| ~~Q-8~~ | ~~Which hook exposes received lines?~~ **RESOLVED: `octoprint.comm.protocol.gcode.received`**, present in 2.0. Also available: `.queuing` / `.queued` / `.sending` / `.sent` / `.error`, `octoprint.comm.protocol.action`, `.atcommand.*`, `.firmware.*`, `.temperatures.received`. | — | Done |
 
 ## Upstream asks (file as issues)
 

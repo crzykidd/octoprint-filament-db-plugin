@@ -97,12 +97,17 @@ Nothing is in flight. The design is settled and the repo scaffolding is in place
    and `Dockerfile.dev` are written but **have never been run** — verify the 2.0 RC upgrade
    actually takes (the Dockerfile asserts it), then walk the wizard and enable the virtual
    printer. This also answers **Q-3**.
-2. **Resolve the remaining open questions (Q-1, Q-3…Q-8 in `docs/prd.md`).** Q-2 is done. Most of
-   the rest fall out of step 1 plus a live Filament DB query. Good first handoff prompt
-   (`model: opus` — it's research).
+2. ~~Resolve the open questions.~~ **Done — Q-1…Q-8 are all answered** (2026-08-01), see the Open
+   questions table in `docs/prd.md`. Two changed requirements: `M600` is **not** in OctoPrint's
+   default `pausingCommands`, so a filament change does not pause the print at all; and `spoolId`
+   is optional on `POST /api/print-history`, which is exactly why it must always be sent.
 3. **Formally adopt `code-checkin-and-pr @ 1.2.0`** once CI exists. The branch rule is already
    implemented (`dev` + protected `main`); the CI checks are what's missing.
-4. **Then implement bottom-up**, in this order — each layer is pure and testable before the
+4. **Seed two test records in the dev Filament DB** before trusting FR-6/FR-2: a **null-density**
+   filament (the fallback chain is currently untestable — all 10 records have a density) and enough
+   filaments to exercise the picker cache. The dev instance is small (10 filaments / 7 spools),
+   unlike production.
+5. **Then implement bottom-up**, in this order — each layer is pure and testable before the
    next depends on it: `metering/odometer.py` → `metering/convert.py` →
    `metering/gcode_meta.py` → `client/filamentdb.py` → `journal.py` → `retry.py` → `job.py` →
    `api.py` → UI (sidebar + picker, then the FR-9b history/failure report).
