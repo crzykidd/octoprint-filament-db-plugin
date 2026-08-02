@@ -306,16 +306,22 @@ templates/
 ### Data flow — the happy path
 
 ```
-1. User opens the FilamentDB tab, picks a spool for Tool 0 (and Tool 1..N on multi-tool).
-   → plugin stores {toolIdx: {filamentId, spoolId, ...cached display fields}} in settings.
+1. User loads a spool on the machine and records it: opens the FilamentDB tab, clicks a slot,
+   finds the spool (usually by typing its label number), selects it.
+   → plugin stores {toolIdx: {filamentId, spoolId, source, ...cached display fields}} in settings.
+   → warns immediately if that filament has no density — needs no file (FR-2, FR-6).
+   NOTE: no G-code file is selected at this point, and none may be assumed. Loading a spool and
+   choosing a file are separate acts, often hours apart.
 
-2. User selects a G-code file.
+2. (Optional, whenever it happens) User selects a G-code file.
    → FileSelected: read the tail of the file, parse the slicer config block.
-   → Compare parsed filament_type[] against the loaded spools' `type`.
-   → Compare parsed filament used [g][] against each spool's remaining grams.
-   → Surface warnings in the sidebar (non-blocking) / block the print (if configured).
+   → Run the file-dependent checks EARLY as a convenience — material mismatch, sufficiency,
+     unassigned tools — so problems surface before the user walks away.
+   → This step may never happen before step 3; nothing may depend on it.
 
 3. User starts the print.
+   → The AUTHORITATIVE pre-print check runs here (FR-4): last moment before filament is
+     consumed, and the only moment both file and assignments are guaranteed known.
    → PrintStarted: reset the odometer, snapshot the loaded-spool assignment for this job
      (so a mid-print reassignment cannot retroactively rewrite where the filament came from).
 
@@ -451,7 +457,52 @@ a traceback routes to the right file without a search.
 - Cached in memory with a configurable TTL (default 5 min) and a manual **Refresh** button. A
   library of a few hundred filaments is a single request; no pagination exists to use.
 - Picker columns: colour swatch, vendor, name, material type, remaining grams, location, label,
-  lot number. Sortable; free-text filter across vendor/name/type/label.
+  lot number. Sortable.
+
+##### Finding a spool
+
+**Loading a spool is a standalone act.** The user walks up, puts a spool on the machine, and records
+it. **No G-code file is selected and no print is pending** — so nothing in this picker may depend on
+knowing what will be printed. That rules out an "enough for this print" filter and any G-code-driven
+pre-selection of material type; both belong to the pre-print check (FR-4), not to loading.
+
+**One search box, ranked by match quality — no modes.** Verified against the live library, the
+identifiers available per spool are a numeric `label` (all 36 spools: `5, 19, 21, 47 … 204, 224` —
+the user's physical numbering), a 10-char hex `instanceId` (Filament DB's durable per-spool
+identity, and the key NFC/QR resolves against), and the 24-hex Mongo `_id`. Rather than making the
+user pick a search mode, one field ranks:
+
+1. **exact `label`** — the common case; typing `177` puts spool 177 first
+2. **exact `instanceId`** — a scanned or pasted tag id
+3. **exact `_id`** — pasted from a Filament DB URL
+4. **`label` prefix** — `17` → 170–177
+5. **fuzzy** over vendor / name / type / colour name / location
+
+Each row shows **why** it matched, so a fuzzy hit is never mistaken for an exact one. This mirrors
+what `filament-bridge`'s mobile lookup learned in practice: numeric lookup is the common case, text
+search is the fallback — hence its numeric-keypad default.
+
+Search runs **client-side over the cached list** — no round-trip per keystroke. If an exact
+identifier misses locally, fall back to `GET /api/filaments/match?instanceId=…` once (C-3), which
+catches a spool created since the last cache refresh.
+
+**Filters** (persistent, independent of any file):
+
+- **Material type** chips — PLA / PETG / PC / TPU, driven by what is actually in the library.
+- **Location** — 34 of 36 spools have one; this is the "which drawer is it in" filter.
+- **Hide retired**, on by default.
+
+**Default sort: most recently used on this printer**, then `label` ascending for spools never used
+here. The ordering comes from the plugin's **own write journal** (FR-9b) — already stored, free, and
+more relevant than any global last-used, because it reflects what this machine actually consumes. In
+practice a user reloads the same handful of spools.
+
+**Duplicate assignment: warn, do not block.** If a spool is already assigned to another tool, the
+row shows an **"already on Tool N"** badge and selecting it raises a confirmation. One physical spool
+usually cannot be in two slots, so this is normally a mis-click — but it is not the plugin's place to
+declare a printer setup impossible. FR-7 already sums duplicate assignments into a single usage
+entry, so the data stays correct either way; the badge exists so the mistake is *visible* rather than
+silently averaged away.
 - Retain `spools[].instanceId` in the cached model. v1 does not display it, but it is Filament DB's
   durable per-spool identity and costs nothing to keep — it is already in the list projection.
   (Resolution of a scanned tag does **not** depend on this cache: `GET /api/filaments/match` and
@@ -476,6 +527,9 @@ a traceback routes to the right file without a search.
 
 - **Clear** removes the assignment for a tool. A tool with no assignment is metered but its usage
   is discarded at commit time (with a log line), never guessed at.
+- **Warn at assignment time if the filament has no density.** This check needs only the spool, not a
+  file, so it fires the moment a spool is loaded — the earliest and cheapest possible point. See
+  FR-6 §What actually happens when there is no density.
 
 #### FR-3: Multi-tool and MMU awareness
 
@@ -540,7 +594,29 @@ abstraction in 2.0, so everything below applies as written.
 
 #### FR-4: Pre-print validation
 
-Triggered on `FileSelected` and re-run whenever a spool assignment changes while a file is selected.
+**Timing matters, and an earlier draft got it wrong.** It triggered these checks on `FileSelected`,
+which quietly assumed loading a spool and choosing a file are part of one flow. They are not: a user
+loads spools when they load spools, and picks a file later — often much later, often having loaded
+nothing since. **At load time there is no file, so nothing about the print can be known.**
+
+Checks are therefore grouped by **what they actually depend on**, and each runs at the earliest
+point its inputs exist:
+
+| Check | Depends on | Runs at |
+|---|---|---|
+| Filament has no density | the spool alone | **assignment time** (FR-2) — no file needed, earliest possible warning |
+| Filament DB unreachable | nothing | startup + print start |
+| No spool assigned for a tool the file uses | file **+** assignment | **print start** |
+| Material mismatch | file **+** assignment | **print start** |
+| Insufficient filament | file **+** assignment | **print start** |
+
+**Print start is the authoritative gate.** It is the last moment before filament is consumed and the
+only moment both the file and the assignments are guaranteed known. `FileSelected` is an *early
+bonus* — if a file happens to be selected, run the file-dependent checks then too, so problems
+surface before the user walks away. It is not the primary trigger, and nothing may depend on it
+having fired.
+
+Re-run the file-dependent checks whenever an assignment changes *while* a file is selected.
 
 Reads, in priority order:
 
@@ -558,8 +634,7 @@ Checks performed:
 
 | Check | Requires | Behaviour |
 |---|---|---|
-| **No spool assigned** | — | Warn per unassigned tool that the G-code actually uses. |
-| **Assigned spool has no density** | — | Warn that usage will be **estimated**, naming the filament, with a deep link to fix it in Filament DB. Fires here — at file-select — because that is when the fix is cheap. See FR-6 §What actually happens when there is no density. |
+| **No spool assigned** | file + assignment | Warn per unassigned tool that the G-code actually uses. |
 | **Material mismatch** | slicer block | Warn when `filament_type[n]` ≠ the assigned spool's `type` (case-insensitive, trimmed). |
 | **Insufficient filament** | slicer block *or* analysis | Warn when required grams exceed the spool's remaining **net** filament, minus a configurable safety buffer (default 0 g). Use Filament DB's own `spool-check` endpoint — see below. |
 | **Filament DB unreachable** | — | Warn that usage will not be recorded. |
@@ -569,8 +644,14 @@ does not fire for Cura-sliced files. The sufficiency check still works via the a
 The UI must say *why* a check was skipped rather than showing a silent pass — a green tick that
 means "not checked" is worse than no tick.
 
-Each check is individually toggleable, and each has a **warn / block** mode (default: warn). Block
-mode refuses the print via the print-start path and raises a clear notification.
+Each check is individually toggleable, and each has a **warn / block** mode (default: warn).
+
+**How "block" actually blocks is an open implementation question (Q-9).** OctoPrint fires
+`PrintStarted` *after* the job has begun, so cancelling there means the printer has already homed and
+may have purged. The candidate approaches — a confirmation dialog before the job starts, refusing the
+first commands at the `gcode.queuing` phase, or cancelling immediately on `PrintStarted` — differ in
+how clean the abort is. Warn mode has no such problem and is the default, so this does not block v1's
+core path.
 
 **Use `GET /api/filaments/:id/spool-check?weight=N` rather than computing net remaining locally.**
 Filament DB's own endpoint already handles three things the plugin would otherwise reimplement and
@@ -688,10 +769,11 @@ accepts only **grams**. Density is the sole bridge between them, so a missing de
 conversion cannot be done from measurement alone. The handling is three-layered: warn early,
 degrade honestly, stay correctable.
 
-**1. Prevent — warn at file-select, not at commit.** The pre-print check (FR-4) already runs on
-`FileSelected`. It flags a loaded spool whose filament has no density **then**, while the print
-hasn't started and the fix takes ten seconds, with a deep link straight to that filament in
-Filament DB. Discovering it after a 12-hour print is the failure this exists to avoid.
+**1. Prevent — warn at assignment time, not at commit.** This check needs only the spool, so it
+fires the moment the spool is loaded (FR-2) — no file required, and the earliest point it possibly
+can. The warning names the filament and deep-links straight to it in Filament DB, where the fix takes
+ten seconds. Discovering it after a 12-hour print is the failure this exists to avoid. It is repeated
+at print start alongside the file-dependent checks.
 
 **2. Degrade — estimate, commit, and mark it everywhere.** If the user prints anyway, the job is
 **never dropped and never silently guessed**. Grams are computed from the material-type default,
@@ -1395,6 +1477,7 @@ dev instance, and the upstream sources. Kept here as the answer record rather th
 | ~~Q-6~~ | ~~Does `POST /api/print-history` require `spoolId`?~~ **RESOLVED: it is optional — and that is exactly why we must always send it.** Omitting it makes Filament DB pick `first non-retired spool with totalWeight > 0`, falling back to `first non-retired spool`. That is an implicit choice the user never made. Always send `spoolId` explicitly. | — | Done |
 | ~~Q-7~~ | ~~Does OctoPrint fire `PrintPaused` during a firmware-driven MMU change?~~ **RESOLVED by source inspection: no.** `PRINT_PAUSED` fires from exactly one place (`printer/standard.py:1395`), reachable only via a host-side pause, an `// action:pause`/`paused` command, or a command in `pausingCommands`. The capture has none of the three. **See the `pausingCommands` finding below — it is worse than expected.** | — | Done (hardware confirmation still welcome) |
 | ~~Q-8~~ | ~~Which hook exposes received lines?~~ **RESOLVED: `octoprint.comm.protocol.gcode.received`**, present in 2.0. Also available: `.queuing` / `.queued` / `.sending` / `.sent` / `.error`, `octoprint.comm.protocol.action`, `.atcommand.*`, `.firmware.*`, `.temperatures.received`. | — | Done |
+| Q-9 | **How does a pre-print check in "block" mode actually stop a print?** `PrintStarted` fires *after* the job begins, so cancelling there means the printer has already homed and possibly purged. | FR-4 block mode only — **not** the default, so it does not block v1's core path | Compare a pre-start confirmation dialog, refusing commands at `gcode.queuing`, and cancel-on-`PrintStarted`. Check how `octoprint-spoolman` gates its own pre-print verification. |
 
 ## Upstream asks (file as issues)
 

@@ -33,6 +33,56 @@ defensively against OctoPrint's own state, and cross-check the per-tool split at
 against the slicer's per-extruder `filament used [mm]` array — if the total agrees but the split
 does not, warn instead of writing a confidently wrong attribution.
 
+## 2026-08-02 — Loading a spool is a standalone act; checks are grouped by their inputs
+
+An earlier draft triggered all pre-print checks on `FileSelected`, which quietly assumed loading a
+spool and choosing a file are one flow. **They are not.** A user loads spools when they load spools
+and picks a file later — often much later. At load time there is no file, so nothing about the print
+can be known.
+
+Two things follow, and the second is the one that was actually wrong:
+
+1. **The picker cannot depend on the print.** No "enough for this print" filter, and no
+   G-code-driven pre-selection of material type. Both belong to FR-4, not to loading. (The type
+   *chips* stay — they filter the library, not the print.)
+2. **Print start is the authoritative gate**, not file-select. It is the last moment before filament
+   is consumed and the only moment both file and assignments are guaranteed known. `FileSelected`
+   is an early bonus when a file happens to be selected; nothing may depend on it having fired.
+
+Checks are now grouped by what they depend on, each running as early as its inputs allow. The useful
+consequence: **the missing-density warning needs only the spool**, so it fires at *assignment* time —
+earlier than the old design managed, and independent of whether a file is ever selected.
+
+Follow-on: "block" mode needs a mechanism, since `PrintStarted` fires *after* the job begins —
+cancelling there means the printer has already homed and possibly purged. Logged as Q-9. Warn is the
+default, so v1's core path is unaffected.
+
+## 2026-08-02 — Spool picker: one ranked search box, no modes
+
+Grounded in the live library rather than assumed. All 36 spools carry a **numeric `label`**
+(`5, 19, 21, 47 … 204, 224` — the user's physical numbering), a **10-char hex `instanceId`**
+(Filament DB's durable per-spool identity, the NFC/QR key, and the direct equivalent of Spoolman's
+hex id), and a 24-hex Mongo `_id`.
+
+Rejected a mode switch (search-by-label vs search-by-id vs text). Instead **one field ranked by match
+quality**: exact `label` → exact `instanceId` → exact `_id` → `label` prefix → fuzzy over
+vendor/name/type/colour/location, with each row showing *why* it matched so a fuzzy hit is never
+mistaken for an exact one. This matches what `filament-bridge`'s mobile lookup already learned —
+numeric lookup is the common case, hence its numeric-keypad default.
+
+Search is client-side over the cached list (no round-trip per keystroke), falling back once to
+`GET /api/filaments/match?instanceId=` on an exact-identifier miss, which catches a spool created
+since the last refresh.
+
+**Default sort: most recently used on this printer**, from the plugin's own write journal (FR-9b) —
+already stored, and more relevant than a global last-used because it reflects what this machine
+actually consumes.
+
+**Duplicate assignment warns rather than blocks.** One physical spool usually cannot be in two slots,
+so it is normally a mis-click — but it is not the plugin's place to declare a printer setup
+impossible. FR-7 already sums duplicate assignments into one usage entry so the data stays correct;
+the "already on Tool N" badge exists so the mistake is visible rather than silently averaged away.
+
 ## 2026-08-02 — CORRECTION: Filament DB has NFC/identifier lookup endpoints (C-3 was wrong)
 
 The preceding NFC entry claimed Filament DB has **no lookup-spool-by-identifier endpoint**, so an
