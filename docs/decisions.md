@@ -33,6 +33,44 @@ defensively against OctoPrint's own state, and cross-check the per-tool split at
 against the slicer's per-extruder `filament used [mm]` array — if the total agrees but the split
 does not, warn instead of writing a confidently wrong attribution.
 
+## 2026-08-02 — CORRECTION: Filament DB has NFC/identifier lookup endpoints (C-3 was wrong)
+
+The preceding NFC entry claimed Filament DB has **no lookup-spool-by-identifier endpoint**, so an
+NFC read would have to resolve client-side against the picker cache. **That was wrong**, and so was
+C-3's claim that there is no standalone spool endpoint. Both were over-generalised from a
+`filament-bridge` doc note about there being no spool-*label* lookup — a note that was true for
+what the bridge uses and false as a general statement.
+
+Enumerating Filament DB's actual API routes found four relevant endpoints:
+
+- **`POST /api/nfc/decode`** — decodes raw OpenPrintTag CBOR / Bambu MIFARE / OpenTag3D bytes
+  server-side and returns `{decoded, match, candidates}`. Its docstring states the intent: the
+  mobile scanner's whole job is read bytes → POST → render, deliberately centralised so there is
+  one tested decoder rather than drifting duplicates.
+- **`GET /api/filaments/match?instanceId=&name=&vendor=&type=`** — identifier resolution with tier
+  order `instanceId → name → vendor+type → vendor`, returning `{match, candidates, matchedSpool}`.
+- **`GET /api/spools/{spoolId}`** — `{filament, spool}` with the filament **inheritance-resolved**.
+- `GET /api/scan/stream` + `POST /api/scan/publish` — the scan event stream.
+
+Both `match` and `nfc/decode` are deliberately outside the same-origin guard; their docstrings name
+the mobile app and PrusaSlicer/OrcaSlicer as intended cross-origin callers. An OctoPrint plugin is
+the same class of client.
+
+**Answering the question that prompted this** — does scanning an OpenPrintTag identify the spool?
+Verified live: querying a real spool's `instanceId` returned `matchedSpool: {_id, instanceId,
+label}` plus the filament, i.e. the exact `(filamentId, spoolId)` pair the plugin needs. But that
+holds for a **Filament-DB-written** tag, whose `spoolUid` carries an FDB instance id. A
+**third-party vendor** OpenPrintTag falls through to the heuristic tiers and yields a filament-level
+match with `matchedSpool: null` — which filament, not which physical spool.
+
+**This also improves v1, not just the future feature.** `GET /api/spools/{spoolId}` is a better read
+for an assigned spool than fetching the parent filament: one call returns both the spool and the
+inheritance-resolved filament, and the plugin already holds the `spoolId`. FR-6 updated.
+
+**Process note:** this is the second time a `filament-bridge` doc note was carried into this PRD as
+a general constraint when it only described that project's usage. Verify against Filament DB's
+actual routes, not the bridge's notes.
+
 ## 2026-08-02 — NFC is additive; four v1 seams keep it that way
 
 NFC spool loading is a **future** version item and is deliberately **not designed** here. The only

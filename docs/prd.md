@@ -146,12 +146,30 @@ that server-side (FR-4). Everything else on the document — cost, temperatures,
 presets, drying, mechanical properties, stock thresholds — belongs to Filament DB and is none of
 this plugin's business.
 
-### C-3: Spools are embedded subdocuments, not a collection
+### C-3: Spools are embedded subdocuments — but there *are* spool-level read endpoints
 
-There is no standalone spool endpoint. Every spool lives in `spools[]` on its filament document,
-and every spool operation is addressed as `(filamentId, spoolId)`. To build a picker the plugin
-fetches `GET /api/filaments` (list projection, embedded spools included) and flattens client-side.
-There is no server-side spool search.
+Spools live in `spools[]` on the filament document, and every **write** is addressed as
+`(filamentId, spoolId)`. But Filament DB does expose spool-level and identifier-level **reads**,
+which an earlier draft of this document wrongly denied:
+
+| Endpoint | Returns | Use |
+|---|---|---|
+| `GET /api/filaments` | list projection, embedded spools | build the picker — one call (FR-2) |
+| **`GET /api/spools/{spoolId}`** | `{filament, spool}`, **filament inheritance-resolved** | **the read for an assigned spool** — one call gets everything the conversion needs |
+| **`GET /api/filaments/match?instanceId=&name=&vendor=&type=`** | `{match, candidates, matchedSpool}` | resolve a scanned identifier; tier order is `instanceId → name → vendor+type → vendor` |
+| **`POST /api/nfc/decode`** | `{decoded, match, candidates}` | decode raw OpenPrintTag / Bambu / OpenTag3D bytes *and* attach the DB match |
+
+**`GET /api/spools/{spoolId}` is the right read for an assigned spool** and replaces the
+fetch-the-parent-filament approach: it returns the spool and its filament in one request, with
+variant inheritance already resolved (same as `GET /api/filaments/{id}`). Verified live.
+
+The `match` and `nfc/decode` routes are deliberately **not** behind Filament DB's same-origin guard
+— their docstrings name the mobile scanner app and the PrusaSlicer/OrcaSlicer integrations as
+intended cross-origin callers. An OctoPrint plugin is the same class of client. When
+`FILAMENTDB_API_KEY` is set, the bearer key gates them like every other `/api` route (C-7).
+
+Still true: there is no full-text spool *search*, so the picker filters client-side over the
+cached list.
 
 ### C-4: `density` is nullable, `diameter` is not — but inheritance is resolved server-side
 
@@ -434,10 +452,10 @@ a traceback routes to the right file without a search.
   library of a few hundred filaments is a single request; no pagination exists to use.
 - Picker columns: colour swatch, vendor, name, material type, remaining grams, location, label,
   lot number. Sortable; free-text filter across vendor/name/type/label.
-- **Retain `spools[].instanceId` in the cached model** even though v1 never displays or uses it.
-  It is Filament DB's per-spool identifier and the resolution key for a future NFC/QR read (FR-14);
-  there is no lookup-by-identifier endpoint, so that resolution has to run against this cache.
-  It already comes back in the list projection — just do not strip it.
+- Retain `spools[].instanceId` in the cached model. v1 does not display it, but it is Filament DB's
+  durable per-spool identity and costs nothing to keep — it is already in the list projection.
+  (Resolution of a scanned tag does **not** depend on this cache: `GET /api/filaments/match` and
+  `POST /api/nfc/decode` do that server-side — see C-3 and FR-14.)
 - The list projection is sufficient for the picker — but **not** for conversion, since it omits
   `diameter` (C-4). The swatch uses the record's **own** `color`, which correctly does not inherit
   from the parent: a variant *is* a colour.
@@ -706,13 +724,13 @@ database would turn a one-job estimate into permanent library truth, and v1 writ
 records only (C-1).
 
 **Confirmed against a live instance (Q-1): the list projection carries `density` but NOT
-`diameter`.** The full list projection is `_id, color, cost, density, hasCalibrations, hasVariants,
-lowStockThreshold, name, netFilamentWeight, optTags, parentId, secondaryColors, spoolWeight, spools,
-tdsUrl, temperatures, totalWeight, type, vendor`. `diameter` appears only in the detail projection
-(`GET /api/filaments/:id`).
+`diameter`.** `diameter` appears only in the inheritance-resolved views.
 
-So the plugin fetches detail for **assigned filaments only** — never for the whole library — and
-caches it. In practice that is one request per loaded tool, refreshed on assignment change.
+So the plugin resolves conversion inputs per **assigned spool** — never for the whole library —
+via **`GET /api/spools/{spoolId}`**, which returns `{filament, spool}` with the filament's variant
+inheritance already resolved (C-3). One request per loaded tool, refreshed on assignment change.
+`GET /api/filaments/{id}` would also work, but the spool-level route is a better fit: the plugin
+already holds the `spoolId`, and it gets the spool back in the same call.
 
 Embedded spools in the list projection carry `_id, instanceId, label, locationId, openedDate,
 purchaseDate, retired, totalWeight` — enough to render the picker (FR-2) without any detail fetch.
@@ -1170,25 +1188,40 @@ The shape, in one line: an NFC tag is read when a spool is loaded → the tag re
 DB spool → that spool becomes the loaded spool for a tool. The reader lives on the OctoPrint host;
 Prusa printers do not read NFC themselves.
 
-**Why this is already additive.** Assignment is the only thing NFC changes, and v1 already funnels
-every assignment through one internal choke point — `assignment.set(tool, spool)` /
-`assignment.clear(tool)` (FR-11). NFC becomes another *caller* of that function. It does not touch
-metering, conversion, commit, or the journal.
+**Filament DB has already built the hard part.** Two purpose-built endpoints, verified live
+(C-3), both explicitly intended for cross-origin clients like this one:
 
-**The v1 decisions that keep it additive.** All are cheap, and all are cheaper now than as a
-migration later:
+- **`POST /api/nfc/decode`** — takes raw tag bytes (OpenPrintTag CBOR, Bambu MIFARE, OpenTag3D),
+  decodes them server-side, and returns `{decoded, match, candidates}`. Its docstring states the
+  design intent plainly: *"the mobile scanner app's whole job is: read NFC bytes → POST here →
+  render the result"*, deliberately centralised so there is one tested decoder instead of drifting
+  duplicates. A plugin doing NFC should reuse it rather than decode anything itself.
+- **`GET /api/filaments/match?instanceId=…`** — resolves an identifier with a documented tier
+  order: `instanceId → name → vendor+type → vendor`.
+
+**How much identity a scan actually yields depends on who wrote the tag:**
+
+| Tag | Result |
+|---|---|
+| **Written by Filament DB** — its `spoolUid` carries an FDB instance id | **Exact spool identity.** `matchFilament` hits the spool-level tier (#732) and returns `matchedSpool: {_id, instanceId, label}` alongside the filament, with `matchedBy: "instanceId"`. Verified live: querying a real spool's `instanceId` returned that exact spool. That is precisely the `(filamentId, spoolId)` pair the plugin needs — nothing further required. |
+| **Third-party / vendor OpenPrintTag** | **Filament-level only.** A vendor `spoolUid` will not collide with an FDB instance id, so matching falls through to the heuristic tiers and returns `matchedSpool: null`, `matchedBy: "heuristic"`. You learn *which filament*, not *which physical spool* — so with multiple spools of that filament, the plugin must pick or ask. |
+
+**Why this is additive.** Assignment is the only thing NFC changes, and v1 already funnels every
+assignment through one internal choke point — `assignment.set(tool, spool)` / `assignment.clear`
+(FR-11). NFC becomes another caller. Metering, conversion, commit and the journal are untouched.
+
+**The v1 decisions that keep it additive:**
 
 | v1 decision | Why NFC needs it |
 |---|---|
-| **Keep `spools[].instanceId` in the cached spool model** (FR-2), even though v1 never reads it | It is Filament DB's per-spool identifier and the thing an NFC/QR match resolves against. Filament DB has **no lookup-spool-by-identifier endpoint**, so resolution is client-side against the cached list — which only works if the cache kept the field. It is already in the list projection; just do not strip it. |
-| **Assignment records carry a `source`** — `manual` in v1 | Distinguishes a hand-picked assignment from an NFC-driven one in the journal and the UI, and stops the two silently overwriting each other later. One enum field. |
-| **The choke point is callable from a background thread**, and pushes a UI update via `send_plugin_message` | NFC events arrive asynchronously, not from a UI click. v1 already needs async→UI push for live metered grams, so this costs nothing extra — but an assignment path built as a request handler only would have to be rewritten. |
-| **The odometer keys on `(tool_index, assignment_id)`**, not bare tool index (already specified, FR-12) | An NFC insert *during* a print is a spool change. It should produce a changeover marker exactly like FR-12's other triggers — and that structure already supports splitting one tool's usage across two spools. |
+| **Assignment records carry a `source`** — `manual` in v1 | Distinguishes a hand-picked assignment from an NFC-driven one in the journal and UI, and stops the two silently overwriting each other. One enum field. |
+| **The choke point is callable from a background thread**, pushing a UI update via `send_plugin_message` | NFC events arrive asynchronously, not from a UI click. v1 already needs async→UI push for live metered grams, so this is free — but an assignment path written as a request handler only would need rewriting. |
+| **The odometer keys on `(tool_index, assignment_id)`**, not bare tool index (already specified, FR-12) | An NFC insert *during* a print is a spool change, and should produce a changeover marker like FR-12's other triggers. That structure already supports splitting one tool's usage across two spools. |
 
-**Deliberately left open** — these are design questions for that version, not now: which reader
-hardware, whether to read tags directly or subscribe to Filament DB's scan stream, how to handle a
-tag that resolves to no known spool, and whether an NFC read should auto-assign or merely
-pre-select for confirmation.
+**Deliberately left open** — design questions for that version, not now: reader hardware; whether to
+read tags on the OctoPrint host or subscribe to Filament DB's `GET /api/scan/stream`; what to do
+with a heuristic-only match on a multi-spool filament; and whether a scan auto-assigns or
+pre-selects for confirmation.
 
 ---
 
