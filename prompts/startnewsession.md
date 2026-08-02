@@ -128,6 +128,11 @@ Nothing is in flight. The design is settled and the repo scaffolding is in place
   3. `hyiger/filament-db#1039` — post the design to the thread; it answers the OP's request.
   4. `hyiger/PrusaSlicer` (Filament Edition fork) — inject the OpenPrintTag UUID / FDB id into
      the G-code config block, which would make FR-13 auto-matching exact instead of fuzzy.
+- **`Octoprint-PrusaMMU` runs on the test rig** (Core One + MMU) — see PRD §Known plugin
+  interactions. It **remaps** `T<n>` at the `gcode.queuing` phase, so the odometer sees the
+  physically-correct tool (benign), and it publishes `plugin_prusammu_mmu_changed` explicitly for
+  other plugins — a better MMU signal than parsing `echo:MMU2:`. Coexistence is **deferred**; both
+  it and this plugin want to own "which spool is in slot N".
 - **Real MMU3 runout capture is committed** at `tests/fixtures/serial/mmu3-filament-change-runout.md`
   — use it, don't invent serial fixtures. It validates the odometer against firmware `M114`
   (exact match), and it **disproved** the earlier assumption that a filament change produces a

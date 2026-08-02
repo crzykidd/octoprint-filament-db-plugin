@@ -551,12 +551,13 @@ this. It is not auto-detected, and — verified against
 report `extruder.count = 1` while the G-code drives `T0`–`T4`. Silently rendering one slot and
 charging five tools' filament to it would be a data-corruption bug, not a UI annoyance.
 
-**Finding 2: another plugin can suppress the tool-change command before the odometer sees it.**
-A handler on `octoprint.comm.protocol.gcode.queuing` may return `None,` to suppress a command
-entirely, and a **suppressed command never reaches the `gcode.sent` phase**. `Octoprint-PrusaMMU`
-does exactly this on MK3s — it intercepts `Tx` and holds it behind a modal instead of sending it.
-An odometer that infers the active tool purely from observed `Tx` commands can therefore miss a
-tool change and charge the wrong spool.
+**Finding 2: another plugin can rewrite or suppress the tool command before the odometer sees it.**
+A `gcode.queuing` handler may replace a command or drop it with `None,`, and a dropped command never
+reaches `gcode.sent`. `Octoprint-PrusaMMU` — which the maintainer runs on the test rig — does both:
+it **remaps** `T<n>` to a different tool when filament mapping is enabled, and **suppresses** the
+literal `Tx` placeholder while it prompts the user. An odometer that infers the active tool purely
+from observed tool commands can therefore diverge from what the file asked for. See §Known plugin
+interactions.
 
 Requirements that follow:
 
@@ -575,10 +576,16 @@ abstraction in 2.0, so everything below applies as written.
 - **Track the active tool defensively.** Maintain the odometer's tool index from observed `Tx`, but
   reconcile it against OctoPrint's own current-tool state rather than trusting the command stream
   as the sole source. Log a warning when the two disagree.
-- **Cross-check per-tool attribution at commit time.** When the slicer block supplies a per-extruder
-  `filament used [mm]` array, compare the odometer's per-tool distribution against it. If the
-  **total** agrees but the **per-tool split** does not, tool attribution broke — warn the user and
+- **Cross-check per-tool attribution at commit time — but expect legitimate divergence.** When the
+  slicer block supplies a per-extruder `filament used [mm]` array, compare the odometer's per-tool
+  distribution against it. If the **total** agrees but the **per-tool split** does not, warn and
   record the discrepancy in the print-history `notes` rather than writing a confidently wrong split.
+
+  **This check false-positives when tool remapping is active.** The slicer array is indexed by the
+  *file's* tool numbers; a remapping plugin makes the printer use *different physical* tools. Both
+  the odometer and the spool assignment then correctly follow the physical tool while the slicer
+  array does not. Detect the condition (see §Known plugin interactions) and downgrade the mismatch
+  to an informational note instead of a warning.
 - `extruder.sharedNozzle` is read and displayed, because it changes what the numbers mean: on a
   shared nozzle, tool-change purge is attributed to whichever tool is active at the time of the
   purge. That is physically correct, but users should see that purge waste lands on a tool rather
@@ -755,13 +762,11 @@ in v1 scope:
 - Any changeover marker (FR-12) implies a firmware-side sequence occurred, so the marker itself is a
   hint that a gap exists at that point in the timeline.
 
-**Known interaction risk — another plugin can hide a command from the odometer.** A handler on
-`octoprint.comm.protocol.gcode.queuing` may suppress a command by returning `None,`, and a
-suppressed command **never reaches the `gcode.sent` phase**. `Octoprint-PrusaMMU` does this to `Tx`
-on MK3s-style setups. The consequence is tool-attribution error, not total error — the E-moves
-still arrive, they are just charged to the wrong tool. Mitigations are specified in FR-3
-(defensive active-tool tracking plus a per-tool cross-check against the slicer's per-extruder
-array at commit time).
+**Known interaction — another plugin can rewrite or suppress tool commands before the odometer sees
+them.** A handler on `octoprint.comm.protocol.gcode.queuing` may return a replacement command, or
+suppress one entirely with `None,` — and a suppressed command **never reaches `gcode.sent`**.
+`Octoprint-PrusaMMU`, which the maintainer runs, does **both**. See §Known plugin interactions for
+the detail and why the net effect on metering is mostly benign.
 
 Non-goals for the odometer in v1: volumetric extrusion (`M200`), firmware retraction (`G10`/`G11`),
 and per-extruder-multiplier compensation (`M221`). Each is logged as an unsupported-command warning
@@ -1345,6 +1350,58 @@ with a heuristic-only match on a multi-spool filament; and whether a scan auto-a
 pre-selects for confirmation.
 
 ---
+
+### Known plugin interactions
+
+#### `Octoprint-PrusaMMU` — *coexistence deferred, but the facts are recorded*
+
+[`jukebox42/Octoprint-PrusaMMU`](https://github.com/jukebox42/Octoprint-PrusaMMU) runs on the
+maintainer's Core One + MMU, i.e. **the primary hardware test rig**. Coexistence design is deferred,
+but three things are verified from its source and matter now.
+
+**1. What it does to the command stream — corrects an earlier claim in this document.** An earlier
+draft said it *suppresses* `Tx`, so the odometer would miss tool changes. It does both, and the
+distinction matters:
+
+| Behaviour | Mechanism | Effect on metering |
+|---|---|---|
+| **Remaps** `T<n>` → `T<mapped>` when filament mapping is on, and on MK4 single-filament override | returns a replacement command | `gcode.sent` still fires — the odometer sees the **remapped**, i.e. **physically correct**, tool. **Benign, arguably desirable.** |
+| **Suppresses** the literal `Tx` placeholder while prompting the user | `return None,` + `set_job_on_hold(True)` | that one command never reaches `gcode.sent`; the real tool command follows after the user chooses |
+| **Rewrites `M109 S`** into `[(cmd,), (T<n>,)]` | appends a tool command | an extra tool command the odometer will see |
+
+So the net effect on **totals is nil**, and on **attribution it is mostly self-correcting**: the
+odometer follows the physical tool, which is what the spool assignment is about. The real casualty
+is the FR-3 cross-check against the slicer's per-extruder array, which is indexed by the *file's*
+tool numbers and will legitimately disagree under remapping.
+
+**2. It publishes events for exactly this purpose.** It registers custom events via
+`octoprint.events.register_custom_events`, and `plugin_prusammu_mmu_changed` carries a source comment
+saying it exists *for other plugins*:
+
+```
+plugin_prusammu_mmu_change     plugin_prusammu_show_prompt
+plugin_prusammu_mmu_changed    plugin_prusammu_refresh_nav
+```
+
+**This is a better MMU signal than parsing `echo:MMU2:` ourselves** (FR-12) — it is a supported
+interface rather than reverse-engineered firmware chatter, and it also reveals when remapping is
+active. Consuming it should be preferred if the plugin is installed, with our own parsing as the
+fallback when it is not.
+
+**3. It already integrates with spool inventory — which is the actual overlap.** It detects the
+`Spoolman` and `SpoolManager` plugins by identifier and adds them to a `FILAMENT_SOURCES` setting.
+So it has a filament-source concept, and **both plugins would want to own "which spool is in slot
+N."** That is the coexistence problem to solve, and it is a product question, not a technical one:
+
+- The source list appears to be **hardcoded detection**, not a registration hook, so becoming a
+  recognised "Filament DB" source likely needs an upstream PR rather than anything we can plug into.
+- Alternatives are to stay independent (two UIs, two sources of truth — poor), or to read its
+  selection and treat it as the authority for *which slot*, while we own the Filament-DB spool
+  identity behind it.
+
+**Deferred deliberately.** Nothing in v1 depends on resolving this: v1's slot assignment is
+self-contained and works whether or not PrusaMMU is installed. Revisit before any MMU-focused
+release, and talk to both upstreams — the Filament DB author already knows about this plugin.
 
 ### Explicit non-goals for v1
 

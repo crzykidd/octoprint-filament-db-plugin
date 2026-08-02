@@ -33,6 +33,44 @@ defensively against OctoPrint's own state, and cross-check the per-tool split at
 against the slicer's per-extruder `filament used [mm]` array — if the total agrees but the split
 does not, warn instead of writing a confidently wrong attribution.
 
+## 2026-08-02 — `Octoprint-PrusaMMU` runs on the test rig; two earlier claims corrected
+
+The maintainer runs [`jukebox42/Octoprint-PrusaMMU`](https://github.com/jukebox42/Octoprint-PrusaMMU)
+on the Core One + MMU, so this is not a hypothetical interaction — it is the primary hardware test
+environment. Coexistence design is **deferred**, but reading its source corrected two claims already
+in this document.
+
+**Correction 1 — it rewrites tool commands, it does not merely suppress them.** FR-3/FR-5 said it
+suppresses `Tx` so the odometer misses tool changes. It does both, and the distinction inverts the
+conclusion:
+
+- It **remaps** `T<n>` → `T<mapped>` (filament mapping / MK4 override) by returning a replacement
+  command, so `gcode.sent` still fires and the odometer sees the **physically correct** tool. That
+  is benign and arguably desirable — the spool assignment is about physical slots.
+- It **suppresses** only the literal `Tx` placeholder while prompting the user, then the real tool
+  command follows.
+- It also rewrites `M109 S` into `[(cmd,), (T<n>,)]`.
+
+Net: **no effect on totals, and attribution is largely self-correcting.**
+
+**Correction 2 — the real casualty is the FR-3 cross-check, not the odometer.** Comparing the
+per-tool split against the slicer's per-extruder array **legitimately false-positives under
+remapping**, because that array is indexed by the *file's* tool numbers while the printer is using
+different physical tools. The check must detect remapping and downgrade the mismatch to
+informational rather than warning about correct behaviour.
+
+**Better MMU signal than we planned.** It registers custom events, and `plugin_prusammu_mmu_changed`
+is commented in its source as existing *for other plugins*. Consuming a supported event beats
+reverse-engineering `echo:MMU2:` chatter (FR-12), and it also exposes when remapping is active.
+Prefer it when installed; keep our own parsing as the fallback.
+
+**The actual overlap is product, not technical.** It detects the `Spoolman` and `SpoolManager`
+plugins and lists them in a `FILAMENT_SOURCES` setting — so both it and this plugin want to own
+"which spool is in slot N." The source list looks like hardcoded detection rather than a
+registration hook, so becoming a recognised "Filament DB" source probably needs an upstream PR.
+Deferred: v1's slot assignment is self-contained and works with or without it installed. Revisit
+before any MMU-focused release.
+
 ## 2026-08-02 — Pre-print checks surface as one confirmation dialog (Q-9 resolved)
 
 The workflow to match is the one the Spoolman plugin proved and users already expect: select
