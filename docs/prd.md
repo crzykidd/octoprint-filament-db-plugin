@@ -594,6 +594,38 @@ abstraction in 2.0, so everything below applies as written.
   are retained in settings (not deleted) but hidden, so downgrading and re-upgrading a profile does
   not silently lose them.
 
+##### Tool numbering: 0-based internally, 1-based on screen
+
+There is a real three-way mismatch here, verified against both systems:
+
+| Source | Numbering | Evidence |
+|---|---|---|
+| G-code `T<n>` | **0-based** | `T0` is the first tool |
+| OctoPrint internals | **0-based** | keys are `"tool" + extruder`; analysis emits `tool%d` |
+| OctoPrint UI | **"Tool 0"** | `gettext("Tool") + " " + extruder` — literally the array index |
+| Prusa MMU hardware | **1-based** | slots are physically labelled 1–5 |
+| Filament DB AMS slots | **1-based** | the dev instance's Core One has `slotName: "Slot 1" … "Slot 5"` |
+
+**OctoPrint has no setting to change this.** Searched 2.0's source for `toolOffset`,
+`firstToolNumber`, `toolNumbering` and similar — nothing exists. The label is derived straight from
+the index, so the only way to present a different number is to do it ourselves.
+
+Rules:
+
+- **Internal keys are always 0-based**, matching `T<n>` and OctoPrint's `tool<n>`. This is the wire
+  format, not a preference. **Never renumber internally** — an offset applied anywhere but the view
+  layer is how off-by-one bugs get into inventory data.
+- **Display defaults to 1-based** for multi-tool setups, because that is what the user reads off the
+  printer *and* off Filament DB. A `toolDisplayOffset` setting (default `1`) covers anyone who
+  prefers otherwise.
+- **Show both where it could be ambiguous** — `Slot 1 (T0)`. Cheap, and it removes all doubt when
+  cross-referencing a G-code file or an OctoPrint terminal log.
+- **Single extruder: follow OctoPrint and drop the number entirely** — it labels a lone tool just
+  `"Tool"`, with no index, and diverging from that would be gratuitous.
+- **The data path never depends on any of this.** Filament DB identifies AMS slots by `_id`, not by
+  index or name, so FR-11's mapping is `tool_index → slotId` and the numbering question cannot reach
+  stored data.
+
 **Verification targets** (these are acceptance tests, not assumptions):
 
 1. A 5-tool shared-nozzle profile renders 5 slots, and `T3` in the stream routes extrusion to
@@ -1142,6 +1174,12 @@ print-history at job end, nothing more.
   and rendered as a disabled "coming in 1.1" control, so enabling it later needs no settings
   migration.
 - Settings schema reserves `filamentDbPrinterId` and a `toolSlotMap` (`{ "0": "<slotId>", … }`).
+  **Keyed by 0-based tool index, valued by the slot's Filament DB `_id`** — never by slot name or
+  slot number. Verified against the dev instance: `amsSlots[]` entries carry an `_id` plus a
+  free-text `slotName` (`"Slot 1" … "Slot 5"`), so the `_id` is the only stable identifier and the
+  0-vs-1 numbering question never touches stored data.
+- A Filament DB printer record for the target machine already exists on the dev instance
+  (`Prusa Core One`, 5 AMS slots), so this is testable when the time comes.
 - All spool assign/clear operations in v1 route through a **single internal choke point**
   (`assignment.set(tool, spool)` / `assignment.clear(tool)`) rather than writing settings from
   several call sites. 1.1 adds the FDB write inside that one function.

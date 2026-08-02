@@ -33,6 +33,34 @@ defensively against OctoPrint's own state, and cross-check the per-tool split at
 against the slicer's per-extruder `filament used [mm]` array — if the total agrees but the split
 does not, warn instead of writing a confidently wrong attribution.
 
+## 2026-08-02 — Tool numbering: 0-based internally, 1-based on screen
+
+A real three-way mismatch, verified rather than assumed:
+
+- **G-code `T<n>` and OctoPrint internals are 0-based** — keys are `"tool" + extruder`, analysis
+  emits `tool%d`, and the UI label is `gettext("Tool") + " " + extruder`, i.e. literally the array
+  index. So OctoPrint shows **"Tool 0"**.
+- **Prusa MMU hardware and Filament DB are 1-based** — MMU slots are physically labelled 1–5, and
+  the dev instance's Core One record has `slotName: "Slot 1" … "Slot 5"`.
+
+**OctoPrint has no setting to change this.** Searched 2.0's source for `toolOffset`,
+`firstToolNumber`, `toolNumbering` and similar — none exist. The number is derived from the index,
+so presenting anything else is our job.
+
+Decision: **0-based internally, always.** That is the wire format (`T<n>`, `tool<n>`), not a
+preference, and an offset applied anywhere but the view layer is precisely how off-by-one bugs reach
+inventory data. **Display defaults to 1-based** via a `toolDisplayOffset` setting, because 1 is what
+the user reads off both the printer and Filament DB. Show both — `Slot 1 (T0)` — wherever it could be
+ambiguous.
+
+Two details that fell out of the check:
+
+- **Single extruder: OctoPrint drops the number entirely** and labels a lone tool just `"Tool"`.
+  Follow that rather than inventing `Tool 1`.
+- **The data path is immune.** Filament DB identifies AMS slots by `_id`, not by index or name, so
+  FR-11's map is `tool_index → slotId` and the numbering question cannot reach stored data. The dev
+  instance already has a `Prusa Core One` printer record with 5 slots, so this is testable.
+
 ## 2026-08-02 — `Octoprint-PrusaMMU` runs on the test rig; two earlier claims corrected
 
 The maintainer runs [`jukebox42/Octoprint-PrusaMMU`](https://github.com/jukebox42/Octoprint-PrusaMMU)
