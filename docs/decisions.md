@@ -6,32 +6,74 @@ reader would otherwise have to re-derive.
 
 ---
 
-## 2026-08-01 — Tool count cannot come from the printer profile alone (FR-3 corrected)
+## 2026-08-02 — Plugin skeleton: six calls the PRD left implicit
 
-The first draft of FR-3 derived the number of tool slots from
-`printer_profile["extruder"]["count"]`, reasoning that OctoPrint already knows it. Validation
-showed that is unsafe:
+Building the first installable code (`pyproject.toml`, `octoprint_filamentdb/`, permissions,
+templates, assets) surfaced six decisions the PRD didn't spell out. None contradict it; all are
+recorded here so a future session doesn't have to re-derive them.
 
-- **The MMU tool count is manual user configuration.** OctoPrint knows an MMU3 has 5 tools only
-  because the user set Number of extruders = 5 and ticked Shared nozzle. Prusa's own docs instruct
-  this; nothing enforces or detects it.
-- **`Octoprint-PrusaMMU` does not set it either.** That plugin works at the G-code and
-  firmware-message level (`Tx` interception, `MMU2:` response parsing) and never touches the
-  profile. So a fully working MMU setup can report `extruder.count = 1` while the G-code drives
-  `T0`–`T4`.
+**1. `templates/` and `static/` both live under `octoprint_filamentdb/`, not at repo root.**
+The Architecture ASCII diagram draws `templates/` unindented (a repo-root sibling of
+`octoprint_filamentdb/`) while `static/` is nested inside it. Followed literally, that would need
+overriding `TemplatePlugin.get_template_folder()`, since OctoPrint's default resolves both
+`templates/` and `static/` relative to the plugin implementation module's own directory
+(confirmed by reading `octoprint/plugin/types.py` in the running 2.0.0rc4 container). Every real
+OctoPrint plugin — including the ones this project cites for UX reference — keeps both under the
+package. Read the diagram's flat `templates/` as an ASCII-art indentation slip rather than a
+deliberate layout, and put both under the package to avoid packaging complexity and an
+unnecessary override. Verified end-to-end: the container renders both panels correctly this way.
 
-Rendering one slot for a five-tool file would charge five tools' filament to one spool — data
-corruption, not a UI annoyance. Slot count is therefore the **union** of the profile count, the
-tool indices in OctoPrint's analysis metadata, and the slicer block's per-extruder array length,
-with a prominent warning when the G-code exceeds the profile.
+**2. `requestTimeout`'s default (5 s) isn't specified anywhere in the PRD.** FR-1 asks for a
+"connection timeout" setting but never numbers it. Picked 5 seconds as a conservative default for
+a LAN service — long enough for a slow instance, short enough that an unreachable one fails
+within one UI action. Documented as a comment beside the constant in `settings_keys.py` rather
+than silently invented.
 
-**Second finding from the same validation:** a plugin can suppress a command at
-`octoprint.comm.protocol.gcode.queuing` (return `None,`), and a suppressed command **never reaches
-`gcode.sent`**. `Octoprint-PrusaMMU` does exactly this to `Tx`. An odometer inferring the active
-tool solely from observed `Tx` can therefore mis-attribute. Mitigation: track the active tool
-defensively against OctoPrint's own state, and cross-check the per-tool split at commit time
-against the slicer's per-extruder `filament used [mm]` array — if the total agrees but the split
-does not, warn instead of writing a confidently wrong attribution.
+**3. FR-10's "Operator" default group is OctoPrint's `USER_GROUP` ("users").** OctoPrint 2.0 has
+no group literally named "Operator" — `octoprint/access/groups.py` defines the built-in `users`
+group with `"name": "Operator"` as its *display* name. `FILAMENTDB_SELECT`'s `default_groups`
+is `[USER_GROUP]`; `FILAMENTDB_ADMIN`'s is `[ADMIN_GROUP]`. Verified live: the server log on
+startup shows `Added new permission from plugin filamentdb: PLUGIN_FILAMENTDB_SELECT` /
+`_ADMIN` with the expected role needs.
+
+**4. Opted in to Jinja autoescaping (`is_template_autoescaped() -> True`).** Not asked for by the
+PRD or the task prompt, but OctoPrint logs a `WARNING` for every plugin that doesn't override this
+("OctoPrint 2.1.0 will globally enforce autoescaping") — leaving it unset would have meant
+shipping a skeleton that violates "no errors or deprecation warnings" on first boot. Our templates
+never push raw HTML through a variable, so opting in costs nothing.
+
+**5. Real Knockout gotcha: don't cache `settingsViewModel.settings` at viewmodel construction
+time.** First attempt did `self.settings = self.settingsViewModel.settings;` in the
+`FilamentDBViewModel` constructor and bound templates to `settings.plugins.filamentdb`. This
+throws `Cannot read properties of undefined (reading 'plugins')` on every load. Root cause, read
+out of OctoPrint's own `static/js/app/viewmodels/settings.js`: `settingsViewModel.settings` is
+`undefined` until its `requestData()` AJAX call resolves inside `main.js`'s `fetchSettings()` —
+which runs *after* every viewmodel's constructor has already executed. A plain-property capture at
+construction time freezes in that `undefined` forever, since it's an assignment, not a live
+binding. Fix: don't alias `settings` at all; expose `self.settingsViewModel` and bind templates to
+`settingsViewModel.settings.plugins.filamentdb` directly, which OctoPrint's `ko.applyBindings`
+evaluates fresh, after `fetchSettings` has populated the real object. Caught by an actual
+Playwright-driven browser check against the running dev container (see decision 6) — this would
+not have been visible from source review or from the server log alone.
+
+**6. UI verification required a real browser; added one via Playwright rather than skipping the
+check.** No browser tooling was available in-session and none was pre-installed in the sandbox.
+Installed Playwright + Chromium into a throwaway venv under the scratch directory (not committed,
+not part of the plugin) and drove the actual dev-container UI: logged in, opened the sidebar,
+opened Settings → Filament DB, and captured `console` events. This is what caught decision 5's
+binding bug — a log-only check would have reported false success, since the plugin *does* load
+without a Python-side error; the failure is purely client-side. Recommended as the standard way to
+verify future UI-touching prompts against this project rather than trusting server logs alone.
+
+**Gotcha for next time — `docker exec` into the dev container without `PIP_USER=false` installs
+into the bind-mounted `/octoprint/plugins` user site, not the image.** Ran `pip install
+git+.../octoscanner` directly in the running container to satisfy the verification step; without
+`PIP_USER=false` (which `Dockerfile.dev` sets explicitly for exactly this reason) it landed under
+`PYTHONUSERBASE=/octoprint/plugins`, i.e. inside `private_data/octoprint/` on the host, and briefly
+shadowed the container's own `wrapt` with an incompatible version. Cleaned up via `pip uninstall`
+(the stray tree was gitignored and never reached the repo either way). Lesson: run one-off
+tooling like `octoscanner` in an isolated venv outside the container instead — it's static
+analysis over the source tree, it doesn't need OctoPrint installed at all.
 
 ## 2026-08-02 — UI integration: inherit OctoPrint's markup, publish through four channels
 
@@ -519,6 +561,33 @@ and `octoprint.comm.protocol.gcode.received` is the hook for `echo:MMU2:` parsin
 **Test-data gap found while answering Q-1:** the dev Filament DB has 10 filaments / 7 spools, not
 the 200+ of production, and **every record has a non-null density** — so FR-6's density fallback
 chain is currently untestable there. Seed a null-density record before calling FR-6 verified.
+
+## 2026-08-01 — Tool count cannot come from the printer profile alone (FR-3 corrected)
+
+The first draft of FR-3 derived the number of tool slots from
+`printer_profile["extruder"]["count"]`, reasoning that OctoPrint already knows it. Validation
+showed that is unsafe:
+
+- **The MMU tool count is manual user configuration.** OctoPrint knows an MMU3 has 5 tools only
+  because the user set Number of extruders = 5 and ticked Shared nozzle. Prusa's own docs instruct
+  this; nothing enforces or detects it.
+- **`Octoprint-PrusaMMU` does not set it either.** That plugin works at the G-code and
+  firmware-message level (`Tx` interception, `MMU2:` response parsing) and never touches the
+  profile. So a fully working MMU setup can report `extruder.count = 1` while the G-code drives
+  `T0`–`T4`.
+
+Rendering one slot for a five-tool file would charge five tools' filament to one spool — data
+corruption, not a UI annoyance. Slot count is therefore the **union** of the profile count, the
+tool indices in OctoPrint's analysis metadata, and the slicer block's per-extruder array length,
+with a prominent warning when the G-code exceeds the profile.
+
+**Second finding from the same validation:** a plugin can suppress a command at
+`octoprint.comm.protocol.gcode.queuing` (return `None,`), and a suppressed command **never reaches
+`gcode.sent`**. `Octoprint-PrusaMMU` does exactly this to `Tx`. An odometer inferring the active
+tool solely from observed `Tx` can therefore mis-attribute. Mitigation: track the active tool
+defensively against OctoPrint's own state, and cross-check the per-tool split at commit time
+against the slicer's per-extruder `filament used [mm]` array — if the total agrees but the split
+does not, warn instead of writing a confidently wrong attribution.
 
 ## 2026-08-01 — A real MMU3 capture disproved the "every pause is a marker" assumption
 

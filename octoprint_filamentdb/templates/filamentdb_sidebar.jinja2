@@ -1,0 +1,13 @@
+{# Copyright (C) 2026 crzykidd -- SPDX-License-Identifier: AGPL-3.0-or-later #}
+{#
+  Filament DB sidebar content. OctoPrint supplies the accordion-group
+  wrapper (id="sidebar_plugin_filamentdb") -- this template is content
+  only, never the container. See docs/prd.md "OctoPrint UI framework".
+
+  Bound (custom_bindings) to static/js/filamentdb.js's FilamentDBViewModel.
+  The spool list itself is a later step; this placeholder only proves the
+  binding works end to end.
+#}
+<div class="filamentdb-sidebar">
+    <p class="muted" data-bind="text: placeholderText"></p>
+</div>

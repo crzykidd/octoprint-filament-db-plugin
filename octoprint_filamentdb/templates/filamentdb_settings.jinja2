@@ -1,0 +1,40 @@
+{# Copyright (C) 2026 crzykidd -- SPDX-License-Identifier: AGPL-3.0-or-later #}
+{#
+  Filament DB settings content. OctoPrint supplies the settings-dialog
+  wrapper (id="settings_plugin_filamentdb") -- this template is content
+  only. Bootstrap 2 form markup so theme plugins can restyle it (never
+  hardcode colours here).
+
+  Bound (custom_bindings) to static/js/filamentdb.js's FilamentDBViewModel,
+  which exposes `settingsViewModel` (parameters[0]). Read
+  `settingsViewModel.settings...` directly here rather than through an
+  alias cached at construction time -- see the comment in filamentdb.js
+  for why that breaks.
+#}
+<form class="form-horizontal" data-bind="with: settingsViewModel.settings.plugins.filamentdb">
+    <div class="control-group">
+        <label class="control-label" for="filamentdb-url">{{ _('Filament DB URL') }}</label>
+        <div class="controls">
+            <input type="text" class="input-block-level" id="filamentdb-url"
+                   data-bind="value: filamentDbUrl"
+                   placeholder="http://filament-db.local:3000">
+        </div>
+    </div>
+    <div class="control-group">
+        <label class="control-label" for="filamentdb-api-key">{{ _('API key') }}</label>
+        <div class="controls">
+            <input type="password" class="input-block-level" id="filamentdb-api-key"
+                   data-bind="value: filamentDbApiKey"
+                   placeholder="{{ _('optional -- only needed if FILAMENTDB_API_KEY is set') }}">
+            <span class="help-block">{{ _('Only sent to the URL above. Never shown to non-admin users.') }}</span>
+        </div>
+    </div>
+    <div class="control-group">
+        <label class="control-label" for="filamentdb-request-timeout">{{ _('Request timeout (seconds)') }}</label>
+        <div class="controls">
+            <input type="number" class="input-mini" min="1" step="1"
+                   id="filamentdb-request-timeout"
+                   data-bind="value: requestTimeout">
+        </div>
+    </div>
+</form>

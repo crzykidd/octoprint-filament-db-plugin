@@ -21,8 +21,14 @@ RUN PIP_USER=false pip install --no-cache-dir --upgrade "OctoPrint==${OCTOPRINT_
 # after an hour of debugging why a 2.0-only API is missing.
 RUN PIP_USER=false python -c "import octoprint; v=octoprint.__version__; print('OctoPrint', v); assert v.startswith('2.'), f'expected 2.x, got {v}'"
 
-# Once the plugin has packaging (pyproject.toml), install it editable so a container
-# restart picks up Python changes without a rebuild:
-#   RUN PIP_USER=false pip install --no-cache-dir -e /plugin
-# Left commented until packaging exists — an editable install of a directory with no
-# pyproject.toml fails the build.
+# /plugin is empty at build time -- docker-compose.dev.yml only bind-mounts the real
+# source there at *runtime*, overlaying whatever is copied in below. Copy the repo in
+# now purely so `pip install -e` has a pyproject.toml to read; the editable install's
+# egg-link points at the path /plugin, not at this layer's copy, so once the bind mount
+# takes over at container start, imports resolve against the live source instead.
+COPY . /plugin
+
+# Install the plugin editable, so a container restart picks up Python changes without
+# a rebuild. The `dev` extra pulls in pytest for the test-suite verification step; it
+# is not needed at runtime.
+RUN PIP_USER=false pip install --no-cache-dir -e "/plugin[dev]"

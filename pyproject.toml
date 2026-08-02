@@ -1,0 +1,57 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "OctoPrint-FilamentDB"
+dynamic = ["version"]
+description = "Assigns Filament DB spools to printer tools, meters actual extrusion, and writes print-history usage back to Filament DB."
+readme = "README.md"
+license = { text = "AGPL-3.0-or-later" }
+requires-python = ">=3.9"
+authors = [{ name = "crzykidd" }]
+classifiers = [
+    "Framework :: OctoPrint",
+    "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.9",
+    "Topic :: Printing",
+]
+dependencies = [
+    "OctoPrint>=2.0.0rc4",
+    "requests",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.urls]
+Homepage = "https://github.com/crzykidd/octoprint-filament-db-plugin"
+Source = "https://github.com/crzykidd/octoprint-filament-db-plugin"
+Issues = "https://github.com/crzykidd/octoprint-filament-db-plugin/issues"
+
+# The mechanism OctoPrint's plugin loader uses to discover a plugin package:
+# an entry point in the "octoprint.plugin" group, keyed on the plugin
+# identifier (docs/prd.md "Naming & repo").
+[project.entry-points."octoprint.plugin"]
+filamentdb = "octoprint_filamentdb"
+
+[tool.setuptools.packages.find]
+include = ["octoprint_filamentdb*"]
+
+# Version is stored bare, in exactly one place (release-prep-and-cut rule in
+# CLAUDE.md) -- octoprint_filamentdb/_version.py. Everything else, including
+# this file, reads it from there rather than declaring its own copy.
+[tool.setuptools.dynamic]
+version = { attr = "octoprint_filamentdb._version.__version__" }
+
+[tool.setuptools.package-data]
+octoprint_filamentdb = [
+    "templates/*.jinja2",
+    "static/js/*.js",
+    "static/css/*.css",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

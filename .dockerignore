@@ -1,0 +1,22 @@
+# Keep the build context copied into /plugin (see Dockerfile.dev) free of
+# anything machine-specific or sensitive. private_data/ in particular holds
+# dev-credentials.md and the OctoPrint runtime volume -- neither belongs
+# baked into an image layer, dev-only image or not.
+.git/
+private_data/
+
+# Python / test caches -- regenerated, never needed in the image.
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Editors / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
