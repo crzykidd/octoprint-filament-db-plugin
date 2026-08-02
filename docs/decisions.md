@@ -33,6 +33,46 @@ defensively against OctoPrint's own state, and cross-check the per-tool split at
 against the slicer's per-extruder `filament used [mm]` array — if the total agrees but the split
 does not, warn instead of writing a confidently wrong attribution.
 
+## 2026-08-02 — UI integration: inherit OctoPrint's markup, publish through four channels
+
+Researched against the running 2.0.0rc4 container rather than the docs, since 2.0 changed several
+view models. Two goals: look native under theme plugins, and be consumable by third-party dashboards
+without them doing work.
+
+**Theming is solved by *not* being clever.** OctoPrint is Bootstrap 2.3 + Knockout + LESS, and it
+wraps plugin templates in its own markup — the sidebar becomes an `accordion-group` with an
+`accordion-heading`/`accordion-toggle`. Theme plugins (Themeify, UI Customizer) work by CSS-overriding
+OctoPrint's own selectors, so the rule is: **use OctoPrint's and Bootstrap's existing classes and let
+themes restyle us; never hardcode a colour.** The single exception is the filament colour swatch,
+which is literal data.
+
+Corollary worth recording: `sidebar_plugin_filamentdb` / `tab_plugin_filamentdb` etc. are derived
+from the plugin identifier and are what themes and user CSS target — a **public contract**, and
+another reason the identifier can never change. Dark themes are the norm in this ecosystem (the
+reference Spoolman screenshot is dark), so never assume a light background.
+
+**The dashboard question has one specific answer: `octoprint.printer.additional_state_data`.**
+The hook returns a dict which OctoPrint merges into the **printer state payload** under the plugin's
+name and pushes to every client on the state monitor's 0.5 s tick. Dashboards already consume that
+payload, so publishing there means they pick us up with no coupling and no work on their side.
+
+Two constraints read straight off the implementation, both load-bearing:
+
+- The return value is validated as JSON-serialisable; a `ValueError` is logged and dropped.
+- **Any other exception blocklists the hook for the remainder of the session** — `_blocklisted_data_hooks`,
+  never retried until restart. So it must be cheap, defensive, and incapable of throwing: read
+  pre-computed state, no I/O, catch-all returning `{}`.
+
+Payload stays small and stable since it ships twice a second to every client: per tool the spool id,
+label, display name, colour, net remaining and grams used this job, plus connection state. Never the
+library.
+
+Decision: **publish through all four channels deliberately** — the state-data hook for dashboards,
+custom events (`plugin_filamentdb_*`) for other Python plugins, `send_plugin_message` for frontend
+consumers, and the REST API for pull access. They serve different consumers and each is cheap
+compared with someone having to scrape our UI. Emitting custom events also reciprocates what
+`Octoprint-PrusaMMU` does for us.
+
 ## 2026-08-02 — Edit-spool (FR-15) copies filament-bridge's semantics rather than inventing them
 
 Future feature: re-weigh a spool on load. You take it off the shelf, put it on a scale, and the

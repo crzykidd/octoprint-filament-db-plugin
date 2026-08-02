@@ -301,7 +301,10 @@ templates/
 | Hook | Purpose |
 |---|---|
 | `octoprint.comm.protocol.gcode.sent` | the odometer — every command actually sent to the printer |
+| `octoprint.comm.protocol.gcode.received` | firmware messages for changeover detection (FR-12) |
 | `octoprint.access.permissions` | declare `FILAMENTDB_SELECT` and `FILAMENTDB_ADMIN` |
+| `octoprint.printer.additional_state_data` | **publish spool state to dashboards** — see §OctoPrint UI framework. Must never throw: one exception blocklists it until restart |
+| `octoprint.events.register_custom_events` | emit `plugin_filamentdb_*` for other plugins |
 
 ### Data flow — the happy path
 
@@ -452,6 +455,86 @@ have *zero* dependencies. Grams need an assigned spool, a Filament DB client, a 
 conversion; millimetres need only hook → accumulate → display. So a live mm counter is buildable
 before any of the data layer exists, and it can be checked against the slicer's
 `filament used [mm]` at print end — which is already FR-5's acceptance bar.
+
+### OctoPrint UI framework — how we plug in
+
+Verified against the running 2.0.0rc4 container rather than the docs, since 2.0 changed several
+view models.
+
+**The stack is Bootstrap 2.3 + Knockout + LESS.** OctoPrint injects plugin templates by naming
+convention and wraps them in its own markup — **we supply pure content, never the container.**
+
+| Type | Our template file | OctoPrint's div id |
+|---|---|---|
+| `sidebar` | `filamentdb_sidebar.jinja2` | `sidebar_plugin_filamentdb` |
+| `tab` | `filamentdb_tab.jinja2` | `tab_plugin_filamentdb` |
+| `settings` | `filamentdb_settings.jinja2` | `settings_plugin_filamentdb` |
+
+Other types exist (`navbar`, `wizard`, `about`, `usersettings`, `webcam`, `connection_options`,
+`generic`) and follow the same `<identifier>_<type>.jinja2` → `<type>_plugin_<identifier>` pattern.
+
+The sidebar wrapper OctoPrint builds around us is a Bootstrap **`accordion-group`** with an
+`accordion-heading` / `accordion-toggle` and a collapsible body, and it applies our
+`classes` / `classes_wrapper` / `styles` / `data_bind` / `icon` config to that structure. Icons take
+FontAwesome 5/6 prefixes (`fas`, `far`, `fab`); a bare name falls back to `fa fa-<name>`.
+
+#### Looking native, and surviving theme plugins
+
+Theme plugins — Themeify, UI Customizer and friends — work by **CSS-overriding OctoPrint's own
+selectors**. That gives one clear rule with a real consequence:
+
+> **Use OctoPrint's and Bootstrap 2's existing classes and let the theme restyle us. Never hardcode
+> a colour.**
+
+- Semantic classes only: `.muted`, `.text-error`, `.text-warning`, `.text-success`, `.label`,
+  `.badge`, `.progress`, `.btn`, `.btn-mini`, `.table`. A theme already knows how to restyle those.
+- The one place colour is ours to set is the **filament colour swatch**, which comes from Filament DB
+  data and is meant to be literal. Everything else inherits.
+- Do not replace the wrapper markup or restyle the `accordion-group` — that is the surface themes
+  target.
+- **`sidebar_plugin_filamentdb` and friends are a public contract.** Theme plugins and user CSS will
+  target those ids, which is another reason the plugin identifier must never change (C-3 naming).
+- Dark themes are the common case in this ecosystem — the reference Spoolman screenshot is dark.
+  Never assume a light background; test both.
+
+#### Being consumable by dashboards and other plugins
+
+This is the part that determines whether third-party dashboards "just pick us up". **Four
+mechanisms, and the first is the one that matters.**
+
+**1. `octoprint.printer.additional_state_data` — the dashboard channel.** The hook is called as
+`hook(initial=False)`, returns a dict, and OctoPrint merges it into the **printer state payload**
+under the plugin's name, pushed to every connected client on the state monitor's 0.5 s tick. Every
+dashboard already consumes that payload, so publishing here means integrations get our data with no
+work on their side and no coupling to us.
+
+Two hard constraints read off the implementation:
+
+- The return value is **validated as JSON-serialisable**; a `ValueError` is logged and the entry
+  dropped.
+- **Any other exception blocklists our hook for the rest of the session** (`_blocklisted_data_hooks`)
+  — it is not retried until OctoPrint restarts. So this hook must be *cheap, defensive and incapable
+  of throwing*: read pre-computed state, never do I/O, wrap the body in a catch-all that returns
+  `{}`.
+
+Keep the payload small and stable — it ships twice a second to every client. Per tool: spool id,
+label, display name, colour, net remaining grams, and grams used this job; plus overall connection
+state. Never the spool library.
+
+**2. Custom events** via `octoprint.events.register_custom_events`, firing
+`plugin_filamentdb_<event>` on OctoPrint's event bus for other **Python** plugins — e.g. spool
+assigned, usage committed, commit failed. This is exactly the mechanism `Octoprint-PrusaMMU` uses to
+publish `plugin_prusammu_mmu_changed`, and the one we would consume from it (§Known plugin
+interactions). Reciprocating is cheap and makes us a good citizen.
+
+**3. `send_plugin_message`** — SockJS push to the frontend, received by any plugin's JS via
+`onDataUpdaterPluginMessage`. Drives our own live sidebar updates and is incidentally consumable.
+
+**4. Our REST API** at `/api/plugin/filamentdb` for pull-based server-side access (CSRF-protected by
+default in 2.0 — C-6).
+
+**Publish through all four deliberately.** They serve different consumers, and the cost of each is
+small compared with someone having to scrape our UI.
 
 ### Reference: the Spoolman plugin's sidebar
 

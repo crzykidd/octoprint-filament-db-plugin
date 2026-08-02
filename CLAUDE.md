@@ -63,6 +63,8 @@ table in the same commit as any structural change — PRD rule N-8.*
 | Settings key, new option | `settings_keys.py` **first**, then consumers | N-6 |
 | Plugin API endpoint | `api.py` | FR-2, C-6 (CSRF) |
 | Permissions | `plugin.py` (permissions hook) | FR-10 |
+| Doesn't look right under a theme; custom CSS | `static/css/`, `templates/*.jinja2` | PRD §OctoPrint UI framework — **never hardcode colours**; use Bootstrap 2 / OctoPrint classes |
+| Dashboard/3rd-party plugin can't see our data | `plugin.py` (`additional_state_data`, custom events) | PRD §OctoPrint UI framework — **that hook must never throw; one exception blocklists it until restart** |
 
 ## Code shape
 
