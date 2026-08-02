@@ -125,27 +125,6 @@ use `GET /api/filaments/:id/spool-check` (FR-4), which resolves inheritance and 
 already. Second, **writes debit the gross while checks read the net**, which is what makes the
 over-usage case in FR-7 behave the way it does.
 
-### C-3a: The fields this plugin reads — and only these
-
-Filament DB's filament document has ~40 fields. **The plugin reads seven of them.** Anything else
-is out of scope; do not audit, sync, display, or file upstream issues about fields the plugin does
-not use.
-
-| Field | Used for |
-|---|---|
-| `_id` | identity, deep links |
-| `density` | mm→g conversion (FR-6) |
-| `diameter` | mm→g conversion (FR-6) |
-| `type` | material-mismatch check (FR-4) |
-| `vendor`, `name` | picker + sidebar display |
-| `color` | picker + sidebar swatch |
-| `spools[]` → `_id`, `label`, `totalWeight`, `retired`, `locationId` | picker, assignment, commit |
-
-Net remaining and tare are **never computed locally** — `GET /api/filaments/:id/spool-check` does
-that server-side (FR-4). Everything else on the document — cost, temperatures, calibrations,
-presets, drying, mechanical properties, stock thresholds — belongs to Filament DB and is none of
-this plugin's business.
-
 ### C-3: Spools are embedded subdocuments — but there *are* spool-level read endpoints
 
 Spools live in `spools[]` on the filament document, and every **write** is addressed as
@@ -170,6 +149,27 @@ intended cross-origin callers. An OctoPrint plugin is the same class of client. 
 
 Still true: there is no full-text spool *search*, so the picker filters client-side over the
 cached list.
+
+### C-3b: The fields this plugin reads — and only these
+
+Filament DB's filament document has ~40 fields. **The plugin reads seven of them.** Anything else
+is out of scope; do not audit, sync, display, or file upstream issues about fields the plugin does
+not use.
+
+| Field | Used for |
+|---|---|
+| `_id` | identity, deep links |
+| `density` | mm→g conversion (FR-6) |
+| `diameter` | mm→g conversion (FR-6) |
+| `type` | material-mismatch check (FR-4) |
+| `vendor`, `name` | picker + sidebar display |
+| `color` | picker + sidebar swatch |
+| `spools[]` → `_id`, `label`, `totalWeight`, `retired`, `locationId` | picker, assignment, commit |
+
+Net remaining and tare are **never computed locally** — `GET /api/filaments/:id/spool-check` does
+that server-side (FR-4). Everything else on the document — cost, temperatures, calibrations,
+presets, drying, mechanical properties, stock thresholds — belongs to Filament DB and is none of
+this plugin's business.
 
 ### C-4: `density` is nullable, `diameter` is not — but inheritance is resolved server-side
 
