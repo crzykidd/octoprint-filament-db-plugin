@@ -6,6 +6,136 @@ reader would otherwise have to re-derive.
 
 ---
 
+## 2026-08-02 — Filament DB client + spool picker: three real Knockout bugs only a live
+browser found, plus the scope calls behind them
+
+Step 3 of `prompts/startnewsession.md`'s build order: `client/filamentdb.py` + `client/models.py`
++ `client/cache.py` (the FDB REST client and TTL cache), `weights.py` (C-2's gross→net
+computation), `search.py` (the FR-2 five-tier ranking spec), `assignment.py` (the one choke point
+for `selectedSpools`), `api.py` (the plugin REST surface), and the picker/sidebar UI
+(`static/js/filamentdb*.js`, `templates/filamentdb_sidebar.jinja2`). Verified end to end against
+the running dev container and the live `crzydev.home.arpa:3000` Filament DB instance: unit tests,
+a clean restart, and extensive Playwright-driven browser checks (idle, spool assigned, duplicate
+assignment, all five degraded-weight paths).
+
+**1. Three genuine client-side bugs, all invisible from source review, all caught only by
+actually clicking through the UI in a real browser — reconfirms the standing "UI work needs a
+real browser check" lesson rather than merely restating it.**
+
+- **A `<tr data-bind="click: ...">` wrapping a `<button data-bind="click: ...">` with the *same*
+  handler double-fires it.** The button's click event bubbles to the row, so Knockout's two
+  independent click bindings both run for one physical click. For `selectSpool()` this was
+  actively dangerous, not just wasteful: the second (bubbled) call raced the first call's
+  `showConfirmationDialog()` for the duplicate-assignment warning and could silently eat it,
+  making the warning appear intermittently — sometimes present (screenshot proof), sometimes
+  gone with no assign happening at all and no error anywhere. Fixed by binding the click on the
+  button only. Lesson for future rows/tables in this codebase: never put the same KO click
+  handler on both a row and something clickable inside it.
+- **`printerProfilesViewModel.currentProfile()` is just the profile's id *string*** (e.g.
+  `"coreone"`), not the profile object — confirmed by reading OctoPrint's own
+  `printerprofiles.js`. The actual data, including `extruder.count`, lives on the separate
+  `currentProfileData` observable (a `ko.mapping`-wrapped object). Using `currentProfile()`
+  compiled fine, threw no console error, and simply always evaluated `toolCount` as 1 — a fresh
+  2-tool printer profile silently rendered one sidebar row. Caught only by actually raising the
+  extruder count in the running UI and watching the sidebar not update. Both names are
+  plausible; a source-only read would not have caught the mismatch.
+- **A bare `data-bind` expression referencing a property that doesn't exist on `$data` throws a
+  `ReferenceError`, not `undefined`.** The sidebar's swatch (`style: {backgroundColor: color}`)
+  is outside the `<!-- ko if: assigned -->` guard so the row shape is visible even when empty;
+  the unassigned-row object initially had no `color` key at all (not even `null`), and Knockout's
+  `with($data){ color }` evaluation fell through to global scope and threw, breaking the *entire*
+  view model's binding for both the sidebar and settings panel. Fixed by always seeding a default
+  `color: null` on every row regardless of assignment state. General rule worth keeping: every
+  key a bare (non-`if`-guarded) binding expression touches must exist on every possible shape of
+  that row object, even when the value is meaningless.
+
+**2. A fourth, milder bug from the same root cause as #1's class of issue: a `<form data-bind="with:
+settingsViewModel.settings...">` rebinds `$data` for everything inside it.** The Test Connection
+button was first placed inside that `with` block; `testConnection`/`testingConnection` are
+`FilamentDBViewModel`'s own members, not settings fields, so the bare reference resolved against
+the settings sub-object and threw "testConnection is not defined" — again breaking the whole
+settings panel binding. Fixed by moving the button block outside the `<form>`. Rule: anything
+that isn't itself a `plugins.filamentdb.*` setting does not belong inside that `with`.
+
+**3. `is_api_protected()` must be overridden explicitly (OctoPrint 1.11.2+/2.0).** Leaving the
+`SimpleApiPlugin` default logs a startup deprecation warning every boot ("no new warnings" would
+otherwise fail). Returned `True` — a logged-in user is required before OctoPrint even dispatches
+to `on_api_get`/`on_api_command`; the FR-10 permission checks inside those methods are the actual
+enforcement and remain unchanged.
+
+**4. `octoprint_filamentdb/__init__.py`'s top-level `from .plugin import ...` was silently
+poisoning every standalone import of `client/` or `metering/`**, exactly as the prompt predicted:
+importing any submodule of a package runs that package's `__init__.py` first, so
+`import octoprint_filamentdb.client.filamentdb` failed with `ModuleNotFoundError: octoprint` even
+though `client/filamentdb.py` itself imports nothing but `requests`. Fixed by deferring the
+`.plugin` import into `__plugin_load__()`, which OctoPrint only ever calls from inside a running
+process where `octoprint` is guaranteed importable. Verified by importing
+`octoprint_filamentdb.client.filamentdb`, `.client.models`, `.client.cache`, `.weights`, and
+`.search` directly from the host Python (no venv, no OctoPrint installed) before writing any
+tests — this is what let `tests/test_filamentdb_client.py` and `tests/test_weights.py` run without
+the container at all.
+
+**5. C-3b's "seven fields" is a floor, not a ceiling — `spoolWeight` and `netFilamentWeight` are
+also read, per C-2 and §Weight display, which are unambiguous and postdate C-3b's list.** Not a
+PRD contradiction requiring escalation: C-2's `net = spool.totalWeight − filament.spoolWeight`
+and §Weight display's `nominal = filament.netFilamentWeight` are explicit, repeated, and load-
+bearing for this exact task, so C-3b's enumeration is read as an earlier, incomplete pass rather
+than a scope boundary. `client/models.py` carries both fields; nothing else on either document is
+read.
+
+**6. Weight display formatting rule the PRD illustrates but never states precisely, resolved
+against the live, verified #177 acceptance figure rather than the prose mock.** Both the PRD's
+sidebar mock (`842.0 g / 1000 g`) and the live acceptance target (`169.4 g / 1000 g` for
+169.37 net) agree: the **net** figure is always rendered to exactly 1 decimal place, even when
+that's a trailing zero; the **nominal/gross-only** figure is trimmed (whole numbers show with no
+decimal). The PRD's degraded-path prose examples (`624 g`, `1042 g gross`) don't disambiguate
+this and are treated as illustrative shorthand, not a literal spec, since the acceptance target is
+the one live-verified oracle. Implemented identically in `weights.py` (pytest-covered) and its
+hand-kept JS port `static/js/filamentdb-weights.js`.
+
+**7. Two ports of pure logic exist deliberately: `weights.py`/`filamentdb-weights.js` and
+`search.py`/`filamentdb-search.js`.** Both algorithms must run client-side with no round trip
+(§Weight display renders from the cached assignment record; FR-2's search is explicitly
+"no request per keystroke"), so the JS side is the real runtime path — but pytest can't execute
+JS without adding a Node toolchain to the container, which was judged out of scope for this step.
+Each Python module therefore doubles as the pytest-covered *specification* of the algorithm's
+rules (rounding, degraded paths, five-tier ranking order), and the JS file is a hand-kept port
+verified by the live Playwright acceptance checks rather than by shared source. Both files'
+docstrings cross-reference each other and warn that a rule change must be made in both places.
+
+**8. `assignment.py` is a new module not in the PRD's original Architecture diagram, added because
+the prompt named it explicitly ("the assignment choke point") and FR-2/FR-11/FR-14 all need one
+place that owns `selectedSpools` reads and writes.** It sits alongside `job.py` in the layering —
+not pure (it touches OctoPrint's settings object and `plugin_manager`), but callable from any
+thread, which is what lets a future NFC read (FR-14, off a serial-hook thread) call `set()`
+directly without a synthetic HTTP round-trip through `api.py`.
+
+**9. The picker's location filter filters and displays by raw `locationId`, not a resolved name.**
+Fetching `/api/locations` to resolve names is a field-family C-3b never lists (only the spool's
+own `locationId` is in scope), so v1 shows the id string. Functionally correct (filters spools by
+which location they share) but not pretty; resolving names is a natural, additive follow-up, not
+a defect in this step.
+
+**10. Hover-tooltip content is intentionally minimal: gross + tare only, via a native `title`
+attribute, not a Bootstrap tooltip widget.** §Sidebar's hover-detail list (notes, lot number,
+location, dates, last-used) includes several fields C-3b doesn't have the plugin reading at all
+(notes, lot number, opened/purchase dates aren't part of the seven-plus-two fields this step
+fetches). Gross and tare are the two PRD explicitly calls "what makes reconciliation possible" and
+are already on hand from the assignment record, so those are what's shown; the rest is deferred
+rather than fetching additional fields not otherwise in scope.
+
+**11. Test Connection is gated on `FILAMENTDB_ADMIN`, not `FILAMENTDB_SELECT`.** It lives on the
+settings page and probes the *configured* URL/key, which FR-10 assigns to Admin ("change plugin
+settings"); `refresh` (bypassing the picker's cache) stays under `FILAMENTDB_SELECT` since it's a
+day-to-day picker action, not a settings action.
+
+**Method reused from the previous step, worth restating:** every one of bugs #1–#4 above was
+invisible from a clean `pytest` run and a clean server log — bugs #1 and #3 threw no error at all
+under some inputs, and #2/#4 threw errors that never reached the terminal (`__init__.py`'s bug
+only shows up importing outside the container; the KO scope bugs only show up as browser console
+errors). A real Playwright session driving actual clicks was the only check that found any of
+them.
+
 ## 2026-08-02 — Live raw-mm odometer: G90/G91-vs-M82/M83 semantics, job.py's role, and a
 resend double-count bug for step 3
 

@@ -5,15 +5,18 @@
 OWNS: the ``FilamentDBPlugin`` mixin class -- the settings/template/asset
     declarations OctoPrint calls directly, startup logging, the
     ``octoprint.access.permissions`` hook (FR-10; see the CLAUDE.md task
-    routing table), and forwarding the ``gcode.sent`` hook / print-lifecycle
-    events to ``job.MeteringSession`` -- plus the one presentation step of
-    formatting its state into a ``send_plugin_message`` payload for the
-    live sidebar readout.
+    routing table), forwarding the ``gcode.sent`` hook / print-lifecycle
+    events to ``job.MeteringSession``, and composing in the plugin REST API
+    (``api.FilamentDBApiMixin``) -- plus the one presentation step of
+    formatting metering state into a ``send_plugin_message`` payload for
+    the live sidebar readout.
 DOES NOT OWN: any decision logic. This is the file PRD rule N-5 is about --
     the moment a method here does more than call into another module or
     return a fixed shape, it has outgrown this file. Every decision about
     *when* the odometer runs, resets, or is due for a throttled push lives
-    in ``job.MeteringSession``, not here.
+    in ``job.MeteringSession``; every decision about spool data, caching,
+    or assignment lives in ``api.py``/``assignment.py``/``client/`` -- none
+    of it here.
 """
 
 from octoprint.access import ADMIN_GROUP, USER_GROUP
@@ -27,6 +30,7 @@ from octoprint.plugin import (
 
 from . import settings_keys
 from ._version import __version__
+from .api import FilamentDBApiMixin
 from .job import MeteringSession
 
 
@@ -75,6 +79,7 @@ class FilamentDBPlugin(
     TemplatePlugin,
     StartupPlugin,
     EventHandlerPlugin,
+    FilamentDBApiMixin,
 ):
     """Mixin composition root for the ``filamentdb`` plugin. Wiring only (N-5)."""
 
@@ -119,7 +124,20 @@ class FilamentDBPlugin(
 
     def get_assets(self):
         return {
-            "js": ["js/filamentdb.js"],
+            # Order doesn't affect correctness (every OCTOPRINT_VIEWMODELS
+            # constructor runs after all plugin assets have loaded), but
+            # is kept dependency-first for readability: the two pure
+            # helper globals, then the picker (which uses both), then the
+            # main viewmodel (which uses all three via
+            # FilamentDBPicker.attach(self) -- see that file's docstring
+            # for why the picker is a separate module at all: keeping
+            # filamentdb.js under the 500-line module cap, N-1).
+            "js": [
+                "js/filamentdb-search.js",
+                "js/filamentdb-weights.js",
+                "js/filamentdb-picker.js",
+                "js/filamentdb.js",
+            ],
             "css": ["css/filamentdb.css"],
         }
 

@@ -2,15 +2,136 @@
  * Copyright (C) 2026 crzykidd
  * SPDX-License-Identifier: AGPL-3.0-or-later
  *
- * OWNS: minimal layout for the plugin's own elements.
- * DOES NOT OWN: colour. No colour literals here -- use OctoPrint's and
- *     Bootstrap 2's existing semantic classes (.muted, .text-error, .label,
- *     ...) and let theme plugins restyle us (docs/prd.md, "OctoPrint UI
- *     framework"). The one deliberate exception, when it lands, is the
- *     filament colour swatch, which is literal Filament DB data rather
- *     than a styling choice.
+ * OWNS: layout for the plugin's sidebar rows, odometer table, and picker
+ *     modal -- spacing, alignment, fixed row height (PRD §Sidebar: "fixed
+ *     four-line rows, everything else in a hover tooltip").
+ * DOES NOT OWN: colour. No colour literals here except where noted -- use
+ *     OctoPrint's and Bootstrap 2's existing semantic classes (.muted,
+ *     .text-error, .label, .progress, ...) and let theme plugins restyle
+ *     us (docs/prd.md, "OctoPrint UI framework"). The one deliberate
+ *     exception is `.filamentdb-swatch`'s `background-color`, which is set
+ *     inline via a Knockout `style` binding from Filament DB's own colour
+ *     data (never a value chosen here) -- this stylesheet only gives the
+ *     swatch its shape.
  */
 
 .filamentdb-sidebar {
     padding: 4px 0;
 }
+
+.filamentdb-row {
+    padding: 4px 0;
+    border-bottom: 1px solid rgba(128, 128, 128, 0.2);
+}
+
+.filamentdb-row:last-child {
+    border-bottom: none;
+}
+
+.filamentdb-line1 {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.filamentdb-tool-label {
+    font-weight: bold;
+    flex: 1;
+}
+
+.filamentdb-row-actions {
+    white-space: nowrap;
+}
+
+.filamentdb-action {
+    margin-left: 6px;
+}
+
+.filamentdb-more {
+    vertical-align: middle;
+}
+
+.filamentdb-more .dropdown-toggle {
+    display: inline-block;
+    padding: 0 4px;
+    font-weight: bold;
+    line-height: 16px;
+}
+
+.filamentdb-swatch {
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    border: 1px solid rgba(128, 128, 128, 0.4);
+    flex: 0 0 auto;
+}
+
+.filamentdb-row-detail {
+    /* Fixed height for lines 2-4 -- keeps every row the same size so
+       several MMU slots fit without scrolling (PRD §Sidebar). */
+    line-height: 1.4em;
+}
+
+.filamentdb-line2,
+.filamentdb-line3,
+.filamentdb-line4 {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.filamentdb-empty {
+    line-height: 1.4em;
+}
+
+.filamentdb-bar {
+    display: inline-block;
+    width: 80px;
+    height: 10px;
+    margin: 0 6px;
+    vertical-align: middle;
+}
+
+.filamentdb-percent {
+    font-size: 0.9em;
+}
+
+.filamentdb-instance-id {
+    font-family: monospace;
+}
+
+.filamentdb-bottom-bar {
+    margin-top: 6px;
+    padding-top: 6px;
+    border-top: 1px solid rgba(128, 128, 128, 0.2);
+    display: flex;
+    gap: 6px;
+}
+
+.filamentdb-odometer {
+    margin-top: 6px;
+}
+
+/* -- picker modal -------------------------------------------------- */
+
+.filamentdb-picker-modal .modal-body {
+    max-height: 60vh;
+    overflow-y: auto;
+}
+
+.filamentdb-picker-search {
+    margin-bottom: 8px;
+}
+
+.filamentdb-picker-filters {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 8px;
+}
+
+.filamentdb-picker-filter {
+    max-width: 160px;
+}
+

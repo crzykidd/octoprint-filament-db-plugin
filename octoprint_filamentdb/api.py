@@ -1,0 +1,195 @@
+# Copyright (C) 2026 crzykidd
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""Plugin REST endpoints for the frontend: list/search spools, assign,
+clear, test connection, force refresh.
+
+OWNS: the ``SimpleApiPlugin`` surface at ``/api/plugin/filamentdb`` -- GET
+    returns the cached, flattened spool library plus current assignments
+    (search itself runs client-side over this, FR-2); POST commands
+    ``assign``, ``clear``, ``test_connection``, ``refresh``. Permission
+    enforcement per FR-10: ``FILAMENTDB_SELECT`` to view/assign/clear/
+    refresh, ``FILAMENTDB_ADMIN`` for ``test_connection`` (a settings-page
+    action). Builds a ``FilamentDBClient`` from the plugin's current
+    settings on every call (cheap -- no connection opens until a request
+    is made) and owns the ``FilamentCache`` instance's lifetime. Never
+    returns the API key.
+DOES NOT OWN: the HTTP client itself (``client/filamentdb.py``), the
+    assignment choke point (``assignment.py`` -- this module calls it,
+    never writes settings directly), or weight arithmetic (``weights.py``
+    -- called here only to annotate the assign response, not stored).
+"""
+
+import flask
+from octoprint.access.permissions import Permissions
+from octoprint.plugin import SimpleApiPlugin
+
+from . import settings_keys, weights
+from .assignment import AssignmentStore
+from .client.cache import FilamentCache
+from .client.filamentdb import FilamentDBClient, FilamentDBError
+
+
+def _serialize_filament(filament):
+    return {
+        "id": filament.id,
+        "name": filament.name,
+        "vendor": filament.vendor,
+        "type": filament.type,
+        "color": filament.color,
+        "density": filament.density,
+        "spoolWeight": filament.spool_weight,
+        "netFilamentWeight": filament.net_filament_weight,
+        "parentId": filament.parent_id,
+        "spools": [
+            {
+                "id": s.id,
+                "instanceId": s.instance_id,
+                "label": s.label,
+                "totalWeight": s.total_weight,
+                "retired": s.retired,
+                "locationId": s.location_id,
+            }
+            for s in filament.spools
+        ],
+    }
+
+
+class FilamentDBApiMixin(SimpleApiPlugin):
+    """Mixed into ``FilamentDBPlugin`` (``plugin.py``). Relies on
+    ``self._settings``, ``self._plugin_manager``, ``self._identifier`` and
+    ``self._logger``, all injected by OctoPrint's plugin loader onto any
+    concrete ``Plugin`` subclass -- *after* construction, which is why the
+    cache and assignment store below are built lazily rather than in
+    ``__init__`` (none of those attributes exist yet at that point)."""
+
+    _cache = None
+    _assignment_store_instance = None
+
+    def _filament_cache(self):
+        if self._cache is None:
+            self._cache = FilamentCache()
+        return self._cache
+
+    def _assignment_store(self):
+        if self._assignment_store_instance is None:
+            self._assignment_store_instance = AssignmentStore(
+                self._settings, self._plugin_manager, self._identifier
+            )
+        return self._assignment_store_instance
+
+    def _client(self):
+        return FilamentDBClient(
+            base_url=self._settings.get([settings_keys.FILAMENT_DB_URL]),
+            api_key=self._settings.get([settings_keys.FILAMENT_DB_API_KEY]),
+            timeout=self._settings.get_int([settings_keys.REQUEST_TIMEOUT]),
+        )
+
+    # -- SimpleApiPlugin --------------------------------------------------
+
+    def is_api_protected(self):
+        # Require a logged-in user before OctoPrint even forwards a
+        # request here (added in OctoPrint 1.11.2 -- overriding is
+        # mandatory or a startup warning is logged). The permission
+        # checks below are still what actually enforce FR-10; this is a
+        # coarser first gate.
+        return True
+
+    def get_api_commands(self):
+        return {
+            "assign": ["toolIndex", "spoolId"],
+            "clear": ["toolIndex"],
+            "test_connection": [],
+            "refresh": [],
+        }
+
+    def on_api_get(self, request):
+        if not Permissions.PLUGIN_FILAMENTDB_SELECT.can():
+            flask.abort(403)
+        try:
+            filaments = self._filament_cache().get(
+                self._client(),
+                self._settings.get_int([settings_keys.CACHE_TTL_SECONDS]),
+            )
+        except FilamentDBError as exc:
+            self._logger.warning("api.py: list_filaments failed: %s", exc)
+            return flask.jsonify(error=str(exc)), 502
+        return flask.jsonify(
+            filaments=[_serialize_filament(f) for f in filaments],
+            selectedSpools=self._assignment_store().all(),
+        )
+
+    def on_api_command(self, command, data):
+        if command == "test_connection":
+            if not Permissions.PLUGIN_FILAMENTDB_ADMIN.can():
+                flask.abort(403)
+            return self._handle_test_connection()
+
+        if not Permissions.PLUGIN_FILAMENTDB_SELECT.can():
+            flask.abort(403)
+
+        if command == "assign":
+            return self._handle_assign(data)
+        if command == "clear":
+            return self._handle_clear(data)
+        if command == "refresh":
+            return self._handle_refresh()
+
+        flask.abort(400)
+
+    def _handle_test_connection(self):
+        try:
+            version = self._client().get_version()
+        except FilamentDBError as exc:
+            self._logger.warning("api.py: test_connection failed: %s", exc)
+            return flask.jsonify(connected=False, error=str(exc)), 502
+        return flask.jsonify(connected=True, version=version)
+
+    def _handle_refresh(self):
+        try:
+            self._filament_cache().get(
+                self._client(),
+                self._settings.get_int([settings_keys.CACHE_TTL_SECONDS]),
+                force_refresh=True,
+            )
+        except FilamentDBError as exc:
+            self._logger.warning("api.py: refresh failed: %s", exc)
+            return flask.jsonify(error=str(exc)), 502
+        return flask.jsonify(success=True)
+
+    def _handle_assign(self, data):
+        tool_index = data.get("toolIndex")
+        spool_id = data.get("spoolId")
+        if tool_index is None or not spool_id:
+            flask.abort(400)
+
+        try:
+            detail = self._client().get_spool(spool_id)
+        except FilamentDBError as exc:
+            self._logger.warning(
+                "api.py: get_spool(%s) failed: %s", spool_id, exc
+            )
+            return flask.jsonify(error=str(exc)), 502
+
+        already_assigned_to = self._assignment_store().find_tool_for_spool(spool_id)
+        record = self._assignment_store().set(tool_index, detail.filament, detail.spool)
+        weight = weights.compute_weight(
+            detail.spool.total_weight,
+            detail.filament.spool_weight,
+            detail.filament.net_filament_weight,
+        )
+        return flask.jsonify(
+            record=record,
+            weightText=weight.text,
+            weightPercent=weight.percent,
+            # Warn at assignment time if the filament has no density (FR-2
+            # / FR-6) -- needs only the spool just fetched, no file.
+            densityWarning=detail.filament.density is None,
+            alreadyAssignedTo=already_assigned_to,
+        )
+
+    def _handle_clear(self, data):
+        tool_index = data.get("toolIndex")
+        if tool_index is None:
+            flask.abort(400)
+        self._assignment_store().clear(tool_index)
+        return flask.jsonify(success=True)
