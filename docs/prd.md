@@ -511,13 +511,16 @@ preserving: incomplete inventory metadata must never block recording what was ac
 
 Always visible; the at-a-glance state. Per tool:
 
+**Four lines per tool, fixed. Everything else lives in a hover tooltip.** Keeping the row height
+constant is what lets five MMU slots fit without scrolling, and it stops a spool with a long note
+pushing the rest off screen.
+
 ```
 ┌─ Filament DB ──────────────────────── ● ┐
 │ ▉ Tool 1                      [✕] [⋯]   │
 │   [PLA] PLA Galaxy Black (Prusament)    │
 │   842.0 g / 1000 g   ▓▓▓▓▓▓▓▓░░  84%    │
-│   #177                                  │
-│   ⌇ dried 2026-07-15                    │
+│   #177 · 970fdbcd56                     │
 │                                         │
 │ ── printing ─────────────────────────── │
 │ ▉ #177   ▲ 12.40 g  ·  4 062 mm         │
@@ -526,15 +529,37 @@ Always visible; the at-a-glance state. Per tool:
 └─────────────────────────────────────────┘
 ```
 
-Field rules, following `octoprint-spoolman`'s precedent of making optional identifiers settings
-toggles (it ships `showLotNumberInSidebar` / `showSpoolIdInSidebar`):
+| Line | Content |
+|---|---|
+| 1 | colour swatch · tool label · `✕` clear · `⋯` menu |
+| 2 | `[TYPE] Name (Vendor)` |
+| 3 | computed net weight + bar (see §Weight display) |
+| 4 | `#label · instanceId` — the hex de-emphasised beside the human-facing label |
 
-| Field | Default | Notes |
-|---|---|---|
-| `label` (`#177`) | **always shown** | The direct analogue of Spoolman's `#181`, and what is physically on the spool. Primary identifier. |
-| `instanceId` (`970fdbcd56`) | **toggle, off** | 10 hex chars, not human-memorable. Earns its place when an NFC/QR scan misbehaves or when cross-referencing. Rendered de-emphasised beside the label. |
-| `notes` | **shown only if non-empty** | Free text on the spool subdocument. One truncated line, full text on hover. Most spools have none, so it costs nothing in the common case. |
-| `lotNumber` | toggle, off | Same treatment as `instanceId`. |
+**Every spool opens directly to its own Filament DB record.** The `⋯` menu carries
+**Open in Filament DB**, and the bottom bar's second button is **Open Filament DB** (the library
+root) — not "Open Spoolman"; this plugin has no Spoolman relationship at all.
+
+The per-spool link is **spool-precise**, not merely filament-level:
+
+```
+{FILAMENTDB_URL}/filaments/{filamentId}?spool={spoolId}
+```
+
+Verified in Filament DB's source: the filament detail page reads `?spool=<id>` from
+`window.location`, then scrolls to and briefly highlights that spool (GH #595) — the same
+deep-link the printed label QRs use. Filament DB still has no *standalone* spool page, so the
+filament page is the destination either way, but the query param lands the user on the right row
+instead of leaving them to find it in a list. Opens in a new tab.
+
+**Hover anywhere on the row for the rest**: notes, lot number, location, **gross weight and tare**
+(the numbers that make a scale reading reconcilable), opened / purchase dates, and when this spool
+was last used on this printer. Nothing here is load-bearing, so hiding it costs nothing — and it
+keeps a spool with a paragraph of notes from wrecking the layout.
+
+This supersedes an earlier draft that put `instanceId` behind a settings toggle and `notes` on a
+conditional fifth line. The hex is genuinely useful beside the label — it is what NFC/QR resolves
+against — and a variable-height row was the wrong trade.
 
 During a print each tool additionally shows **live metered grams *and* raw millimetres**. The
 millimetre figure is the debugging instrument — it is what gets compared against the slicer's
@@ -1145,11 +1170,12 @@ floor at `spoolWeight` when the tare is known, falling back to 0 when it is null
 
 #### FR-8: Result reporting in the UI
 
-- Sidebar shows, per tool: colour swatch, vendor + name, remaining grams, and live metered grams
-  during a print. All displayed grams use **2 decimal places** (FR-6 §Precision and rounding).
-- After a commit: a toast naming the job, the grams committed per spool, and a deep link to the
-  record in Filament DB (`{FILAMENTDB_URL}/filaments/{filamentId}` — Filament DB has **no
-  standalone spool page**, so spool links point at the parent filament).
+- Sidebar layout is specified in §User interface. All displayed grams use **2 decimal places**
+  (FR-6 §Precision and rounding).
+- After a commit: a toast naming the job, the grams committed per spool, and a **spool-precise**
+  deep link — `{FILAMENTDB_URL}/filaments/{filamentId}?spool={spoolId}`. Filament DB has no
+  standalone spool page, but the filament page reads `?spool=` and scrolls to and highlights that
+  spool (verified in source, GH #595). Always link with the query param; never to the bare filament.
 - On commit failure: a persistent (non-auto-dismissing) error with the reason and the pending-retry
   state. Losing usage silently is the worst possible failure for this plugin.
 
@@ -1504,6 +1530,49 @@ pre-selects for confirmation.
 
 ---
 
+#### FR-15: Edit spool — re-weigh on load *(future)*
+
+The workflow: you take a spool off the shelf, put it on a scale, and load it. The recorded weight has
+drifted, and the moment you are already interacting with the plugin is the natural moment to true it
+up. A dialog from the sidebar's `⋯` menu takes the scale reading and writes it to Filament DB.
+
+**`filament-bridge` already solved this exactly** — its mobile update card does the same job from a
+phone. **Match its semantics rather than inventing parallel ones**, since both tools write to the
+same database and a user will reasonably expect them to behave identically.
+
+- **The entered weight is absolute GROSS** — the raw scale reading, whole spool included. Filament DB
+  stores gross, so it is written as-is with no arithmetic on the way in.
+- **Show a live net preview** as they type: `net = gross − tare`, using the filament's `spoolWeight`
+  (C-4, inheritance-resolved). Weighing gives gross; the useful number is net; the plugin does the
+  subtraction so the user never has to.
+- **Two save modes**, mirroring the bridge's `mobile_weight_default_mode`:
+
+  | Mode | Behaviour |
+  |---|---|
+  | `direct_correction` *(default)* | True up `spool.totalWeight` to the new reading via `PUT /api/filaments/:id/spools/:spoolId`. For a straight correction or recalibration. |
+  | `usage` | On a **decrease**, log the delta as a Filament DB *usage* entry — preserving the audit trail, with Filament DB reducing `totalWeight` itself. |
+
+- **The rule that is easy to get wrong: on an *increase*, `usage` mode must fall back to
+  `direct_correction`.** A refill is not negative usage, and recording it as such would corrupt the
+  usage history. This is the bridge's rule and it is correct.
+
+**Scope note.** This is the first write beyond print-history records, which v1 lists as an explicit
+non-goal — that non-goal must be revised when this lands. It does **not** conflict with C-1's
+single-write reasoning: that concerns the *commit path*, where a second non-transactional write
+could half-succeed. This is a separate, user-initiated, idempotent action with its own confirmation.
+
+**v1 seams:**
+
+| v1 decision | Why this needs it |
+|---|---|
+| The sidebar row carries a `⋯` menu from the start, even if v1 only puts *Clear* and *Open in Filament DB* in it | that menu is where *Edit spool* lands; adding an item is additive, adding the affordance later is a layout change |
+| The cached spool model keeps **gross `totalWeight` and the filament's `spoolWeight`** | both are needed for the live net preview, and both are already fetched for the weight display |
+| The Filament DB client is structured so a write method is additive | v1 has exactly one write (`POST /api/print-history`); `PUT …/spools/:spoolId` is a second, not a restructure |
+
+**Deferred with it:** editing location (the bridge does this too, and "the spool is now on this
+printer" is a plausible auto-fill), and editing notes or lot number. Weight is the one with a clear
+trigger — you are holding the spool and a scale.
+
 ### Known plugin interactions
 
 #### `Octoprint-PrusaMMU` — *coexistence deferred, but the facts are recorded*
@@ -1565,7 +1634,8 @@ release, and talk to both upstreams — the Filament DB author already knows abo
   OctoPrint instances, and the auth story for an iframed app with a bearer key is unpleasant.
   v1 uses deep links that open in a new tab.
 - NFC / RFID spool identification at the printer.
-- Writing anything to Filament DB other than print-history records.
+- Writing anything to Filament DB other than print-history records. **Revisit when FR-15 (edit
+  spool) lands** — that adds a deliberate second write path.
 - Filament DB → OctoPrint direction (e.g. FDB telling OctoPrint what is loaded).
 - OctoPrint 1.x support.
 

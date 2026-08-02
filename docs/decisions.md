@@ -33,6 +33,54 @@ defensively against OctoPrint's own state, and cross-check the per-tool split at
 against the slicer's per-extruder `filament used [mm]` array — if the total agrees but the split
 does not, warn instead of writing a confidently wrong attribution.
 
+## 2026-08-02 — Edit-spool (FR-15) copies filament-bridge's semantics rather than inventing them
+
+Future feature: re-weigh a spool on load. You take it off the shelf, put it on a scale, and the
+moment you are already in the plugin is the natural moment to true up the recorded weight.
+
+**`filament-bridge` had already solved this**, in its mobile update card. Rather than design a
+parallel set of semantics for the same database, FR-15 adopts its rules verbatim — a user will
+reasonably expect two of their own tools writing to the same records to behave identically.
+
+Adopted: the entered value is **absolute gross** (the raw scale reading, written as-is because
+Filament DB stores gross); a **live net preview** `gross − tare` while typing; and two save modes
+mirroring `mobile_weight_default_mode` — `direct_correction` (PUT the new weight, the default) and
+`usage` (log the delta as a Filament DB usage entry, preserving the audit trail).
+
+**The rule worth copying most is the one I would have got wrong:** in `usage` mode an *increase*
+must fall back to `direct_correction`. A refill is not negative usage, and recording it as such
+corrupts the usage history.
+
+Scope: this is the first write beyond print-history, so v1's non-goal on that must be revised when it
+lands. It does **not** conflict with C-1's single-write reasoning — that concerns the commit path,
+where a second non-transactional write could half-succeed. This is a separate, user-initiated,
+idempotent action with its own confirmation.
+
+Three v1 seams keep it additive: the sidebar row carries a `⋯` menu from the start (adding an item
+is additive; adding the affordance later is a layout change); the cached spool model keeps gross
+`totalWeight` and the filament's `spoolWeight`, both already fetched for the weight display, for the
+net preview; and the client is structured so a `PUT` is a second method rather than a restructure.
+
+## 2026-08-02 — Sidebar: fixed four-line rows, detail on hover, spool-precise deep links
+
+Revises the earlier sidebar draft, which put `instanceId` behind a settings toggle and `notes` on a
+conditional fifth line. Both were wrong:
+
+- **The hex belongs beside the label**, de-emphasised. It is what NFC/QR resolves against, so it
+  earns permanent space rather than a toggle.
+- **Variable row height was the wrong trade.** A spool with a paragraph of notes would push the rest
+  off screen. Rows are now **fixed at four lines**, which is what lets five MMU slots fit without
+  scrolling, and everything optional — notes, lot number, location, gross weight, tare, dates, last
+  used here — moves to a hover tooltip. None of it is load-bearing, so hiding it costs nothing.
+
+**Deep links are spool-precise.** Verified in Filament DB's source: the filament detail page reads
+`?spool=<id>` from `window.location` and scrolls to and highlights that spool (GH #595) — the same
+mechanism the printed label QRs use. So links are
+`{FILAMENTDB_URL}/filaments/{filamentId}?spool={spoolId}`, never the bare filament. There is still
+no standalone spool page, but the query param lands the user on the right row instead of a list.
+Every spool row gets **Open in Filament DB** in its `⋯` menu, and the bottom bar's button is
+**Open Filament DB** — this plugin has no Spoolman relationship to name.
+
 ## 2026-08-02 — UI designed before metering; remaining weight is computed, not stored
 
 **Sequencing changed on the user's argument, and it was the better call.** The plan had been to build
