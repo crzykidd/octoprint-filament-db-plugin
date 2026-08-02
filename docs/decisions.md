@@ -33,6 +33,52 @@ defensively against OctoPrint's own state, and cross-check the per-tool split at
 against the slicer's per-extruder `filament used [mm]` array — if the total agrees but the split
 does not, warn instead of writing a confidently wrong attribution.
 
+## 2026-08-02 — NFC is additive; four v1 seams keep it that way
+
+NFC spool loading is a **future** version item and is deliberately **not designed** here. The only
+question asked was narrower: does v1 need to change so a later NFC feature doesn't force a redesign?
+Answer: barely.
+
+NFC changes exactly one thing — *what sets the loaded spool* — and v1 already funnels every
+assignment through one internal choke point (`assignment.set`/`clear`, added for the FR-11 slot
+writeback seam). NFC becomes another caller. Metering, conversion, commit and the journal are all
+untouched.
+
+Four v1 decisions keep it additive, each cheap now and a migration later:
+
+1. **Keep `spools[].instanceId` in the cached spool model** even though v1 never reads it. It is
+   Filament DB's per-spool identifier and the key an NFC/QR read resolves against — and since FDB
+   has **no lookup-spool-by-identifier endpoint**, that resolution must run client-side against this
+   cache. It is already in the list projection; the only requirement is not stripping it.
+2. **Assignment records carry a `source`** (`manual` in v1) so NFC- and hand-driven assignments are
+   distinguishable and don't silently overwrite each other.
+3. **The choke point is callable from a background thread** and pushes a UI update. NFC events are
+   asynchronous; an assignment path written as a request handler only would need rewriting. v1
+   already needs async→UI push for live metered grams, so this is free.
+4. **The odometer keys on `(tool_index, assignment_id)`** — already specified for FR-12. An NFC
+   insert mid-print *is* a spool change and should produce a changeover marker like any other.
+
+Left open for that version: reader hardware, whether to read tags directly or subscribe to Filament
+DB's scan stream, unresolvable tags, and auto-assign vs pre-select-for-confirmation.
+
+## 2026-08-02 — Testing is Prusa-first; other platforms untested, not unsupported
+
+Real-hardware verification runs on the maintainer's Prusa MK-series + MMU3 with PrusaSlicer.
+Recorded so the boundary is explicit rather than implied.
+
+The core metering logic is **printer-agnostic by construction** — counting E-moves is a property of
+G-code, not of a vendor — so Marlin/Klipper/RepRap should behave identically. But "should" is not
+"tested", and the README says so rather than implying broader coverage than exists.
+
+The genuinely vendor-specific piece is `echo:MMU2:` parsing, and that is precisely why FR-12's
+*primary* detection signal is a vendor-neutral stall watchdog with message parsing as an
+accelerator. Had it been the other way round, every non-Prusa platform would need its own detection
+implementation.
+
+Boundary noted for later: the advanced-G-code work (`M200` volumetric, `G10`/`G11` firmware
+retraction, `M221` multiplier) is where firmware differences start to matter for real. Each needs
+per-platform verification rather than an assumption that Prusa behaviour generalises.
+
 ## 2026-08-02 — Detail projection resolves inheritance for every conversion-critical field
 
 Tested rather than assumed, after the reasonable proposition that "Filament DB combines the values

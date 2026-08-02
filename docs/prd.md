@@ -434,6 +434,10 @@ a traceback routes to the right file without a search.
   library of a few hundred filaments is a single request; no pagination exists to use.
 - Picker columns: colour swatch, vendor, name, material type, remaining grams, location, label,
   lot number. Sortable; free-text filter across vendor/name/type/label.
+- **Retain `spools[].instanceId` in the cached model** even though v1 never displays or uses it.
+  It is Filament DB's per-spool identifier and the resolution key for a future NFC/QR read (FR-14);
+  there is no lookup-by-identifier endpoint, so that resolution has to run against this cache.
+  It already comes back in the list projection — just do not strip it.
 - The list projection is sufficient for the picker — but **not** for conversion, since it omits
   `diameter` (C-4). The swatch uses the record's **own** `color`, which correctly does not inherit
   from the parent: a variant *is* a colour.
@@ -1156,6 +1160,36 @@ injected into the G-code as a comment (via the `hyiger` PrusaSlicer Filament Edi
 templated custom filament start-G-code). Then matching is exact and trivial. Worth pursuing in
 parallel with v1 implementation.
 
+#### FR-14: NFC-driven spool loading *(future — seams only, not designed here)*
+
+**Not being designed now.** The goal of this section is narrower and specific: confirm that a later
+NFC feature is **additive**, and record the small number of v1 decisions that would otherwise force
+a redesign.
+
+The shape, in one line: an NFC tag is read when a spool is loaded → the tag resolves to a Filament
+DB spool → that spool becomes the loaded spool for a tool. The reader lives on the OctoPrint host;
+Prusa printers do not read NFC themselves.
+
+**Why this is already additive.** Assignment is the only thing NFC changes, and v1 already funnels
+every assignment through one internal choke point — `assignment.set(tool, spool)` /
+`assignment.clear(tool)` (FR-11). NFC becomes another *caller* of that function. It does not touch
+metering, conversion, commit, or the journal.
+
+**The v1 decisions that keep it additive.** All are cheap, and all are cheaper now than as a
+migration later:
+
+| v1 decision | Why NFC needs it |
+|---|---|
+| **Keep `spools[].instanceId` in the cached spool model** (FR-2), even though v1 never reads it | It is Filament DB's per-spool identifier and the thing an NFC/QR match resolves against. Filament DB has **no lookup-spool-by-identifier endpoint**, so resolution is client-side against the cached list — which only works if the cache kept the field. It is already in the list projection; just do not strip it. |
+| **Assignment records carry a `source`** — `manual` in v1 | Distinguishes a hand-picked assignment from an NFC-driven one in the journal and the UI, and stops the two silently overwriting each other later. One enum field. |
+| **The choke point is callable from a background thread**, and pushes a UI update via `send_plugin_message` | NFC events arrive asynchronously, not from a UI click. v1 already needs async→UI push for live metered grams, so this costs nothing extra — but an assignment path built as a request handler only would have to be rewritten. |
+| **The odometer keys on `(tool_index, assignment_id)`**, not bare tool index (already specified, FR-12) | An NFC insert *during* a print is a spool change. It should produce a changeover marker exactly like FR-12's other triggers — and that structure already supports splitting one tool's usage across two spools. |
+
+**Deliberately left open** — these are design questions for that version, not now: which reader
+hardware, whether to read tags directly or subscribe to Filament DB's scan stream, how to handle a
+tag that resolves to no known spool, and whether an NFC read should auto-assign or merely
+pre-select for confirmation.
+
 ---
 
 ### Explicit non-goals for v1
@@ -1271,6 +1305,14 @@ block preserved):
   (C-4). Left to real data it would never run, and the branch would rot untested.
 - **Integration** — FDB client against a mocked HTTP layer, covering: bearer auth, 401, network
   failure, and the exact `POST /api/print-history` payload shape.
+**Hardware scope.** Real-hardware verification is done on the **Prusa ecosystem** (MK-series +
+MMU3, PrusaSlicer) — the maintainer's platform. The core metering logic is printer-agnostic by
+construction (counting E-moves is a property of G-code, not of a vendor), so other firmwares should
+behave identically, but they are **untested and will not be claimed as tested**. The genuinely
+Prusa-specific piece is `echo:MMU2:` message parsing — which is exactly why FR-12's primary
+detection signal is a vendor-neutral stall watchdog rather than message parsing. See the README's
+Testing workflow section for the per-area breakdown.
+
 - **Manual/E2E** — against the real dev Filament DB: print a fixture on the virtual printer, verify
   the print-history record and the spool debit; cancel mid-print and verify partial grams; kill the
   Filament DB container mid-print and verify the commit queue recovers; **run the over-usage case**

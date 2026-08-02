@@ -129,6 +129,57 @@ is needed to build or run from a fresh clone — the container recreates it on f
 Committed test data belongs in `tests/fixtures/` instead. That includes the real MMU3 serial
 capture at `tests/fixtures/serial/`, which is worth reading before touching the metering code.
 
+### Testing workflow
+
+Testing happens in two places, and it is worth being explicit about which one proves what.
+
+**1. Docker + virtual printer — logic.** Everything that is pure computation is tested here and in
+unit tests: the extrusion odometer, mm→gram conversion, slicer-metadata parsing, commit-payload
+construction, the write journal and its retry states. The virtual printer is configured with 5
+extruders and a shared-nozzle profile, so multi-tool code paths are exercised by default. This
+covers most of the plugin and needs no hardware.
+
+**2. A real Prusa printer — behaviour the virtual printer cannot fake.** Anything involving how a
+printer *actually behaves* is validated against real hardware: firmware-initiated pauses, MMU
+tool changes, runout and jam recovery, commands another plugin suppresses before they reach the
+odometer, and the timing of everything above.
+
+#### Primary test target: the Prusa ecosystem
+
+This is the maintainer's hardware, so it is where real-hardware verification happens:
+
+- **Printer:** Prusa MK-series with **MMU3**
+- **Slicer:** PrusaSlicer (including the `hyiger` Filament Edition fork)
+- **Reference capture:** [`tests/fixtures/serial/`](tests/fixtures/serial/) holds a real MMU3
+  runout/jam serial log. It is the source of truth for filament-change detection and has already
+  overturned two design assumptions — prefer it over invented test data.
+
+#### Other printers and slicers: untested, not unsupported
+
+**The core logic is deliberately printer-agnostic.** Extrusion is metered by counting E-moves as
+they are sent, which is a property of G-code rather than of any vendor. Marlin, Klipper, RepRap and
+others should work identically. The same goes for the Filament DB side, which knows nothing about
+printers at all.
+
+What is genuinely Prusa- or slicer-specific, and what happens elsewhere:
+
+| Area | Prusa / PrusaSlicer | Elsewhere |
+|---|---|---|
+| Extrusion metering | tested | should be identical — it is just G-code |
+| Material-type + sufficiency checks | tested (PrusaSlicer config block) | works for OrcaSlicer and Bambu Studio (same block); **Cura emits no material type**, so that one check is skipped and says so |
+| Multi-tool / MMU | tested (MMU3) | tool-change logic is generic `T<n>`; other multi-tool systems untested |
+| `echo:MMU2:` change detection | tested | Prusa-only — **which is why the primary detection signal is a vendor-neutral stall watchdog, not message parsing** |
+| Firmware-initiated pause | tested | varies by firmware; the stall watchdog is the fallback that needs no vendor knowledge |
+
+If you run something else, reports are welcome — especially a serial capture of a filament change,
+which is the single most useful thing to send. Non-Prusa hardware will not block a release, but it
+also will not be claimed as tested.
+
+**This holds until the advanced G-code work.** Volumetric extrusion (`M200`), firmware retraction
+(`G10`/`G11`), and extruder-multiplier compensation (`M221`) are explicit v1 non-goals. Those are
+where firmware differences start to matter for real, and each will need its own verification per
+platform rather than an assumption that Prusa behaviour generalises.
+
 ### Useful commands
 
 ```bash
