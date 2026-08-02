@@ -33,6 +33,37 @@ defensively against OctoPrint's own state, and cross-check the per-tool split at
 against the slicer's per-extruder `filament used [mm]` array — if the total agrees but the split
 does not, warn instead of writing a confidently wrong attribution.
 
+## 2026-08-02 — Pre-print checks surface as one confirmation dialog (Q-9 resolved)
+
+The workflow to match is the one the Spoolman plugin proved and users already expect: select
+filaments once (they persist until changed) → **on Print, see what the job will consume from each
+spool and Continue or Cancel** → on completion, write back.
+
+This replaced a scattering of per-check warn/block toggles with **one dialog at print start**
+showing, per tool, the assigned spool, estimated grams, remaining after, and any problems. Showing
+the numbers *even when nothing is wrong* is the point — it is the moment the user confirms they
+loaded what they think they loaded. Setting: always show (default) / only on problems / never.
+
+**Mechanism, verified in `octoprint-spoolman`'s source.** A backend gate cannot work, because
+`PrintStarted` fires *after* the job begins — by then the printer has homed and may have purged. The
+gate is frontend: replace `printerStateViewModel.print` with a wrapper that shows the modal and calls
+the original only on confirm. **Both entry points need wrapping** — `print` *and* `loadAndPrint` (the
+Files-list action); wrapping only the first leaves a common path ungated.
+
+**Two consequences recorded so nobody later assumes otherwise:**
+
+- **It is a UX gate, not a guarantee.** Prints started via the REST API, a queue plugin, or any
+  non-UI route bypass it entirely. So the authoritative checks still run at `PrintStarted` and record
+  to the journal regardless, and metering/snapshot/commit are driven purely by backend events. A
+  bypassed dialog must never mean an unchecked, unrecorded print.
+- **Monkey-patching another view model is brittle**, and 2.0 changed several view models. Fail soft:
+  if the wrap cannot be applied, log it and degrade to notification-only warnings rather than
+  breaking OctoPrint's Print button.
+
+Where this design deviates from Spoolman's, deliberately: Spoolman writes back **on completion**;
+this plugin writes back on completion **or failure or cancellation**, with partial usage (FR-7).
+Capturing what was actually consumed when a print dies was an original requirement.
+
 ## 2026-08-02 — Loading a spool is a standalone act; checks are grouped by their inputs
 
 An earlier draft triggered all pre-print checks on `FileSelected`, which quietly assumed loading a

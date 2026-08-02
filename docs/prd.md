@@ -319,11 +319,16 @@ templates/
      unassigned tools — so problems surface before the user walks away.
    → This step may never happen before step 3; nothing may depend on it.
 
-3. User starts the print.
-   → The AUTHORITATIVE pre-print check runs here (FR-4): last moment before filament is
-     consumed, and the only moment both file and assignments are guaranteed known.
-   → PrintStarted: reset the odometer, snapshot the loaded-spool assignment for this job
-     (so a mid-print reassignment cannot retroactively rewrite where the filament came from).
+3. User hits Print.
+   → CONFIRMATION DIALOG (FR-4): per tool, the spool, the estimated grams this job needs, the
+     remaining after, and any problems. Continue or Cancel.
+   → Frontend-only gate (wraps printerStateViewModel.print / loadAndPrint). A print started via
+     the REST API skips straight to step 3b -- nothing below may depend on the dialog running.
+
+3b. The job actually starts.
+   → PrintStarted: run the authoritative checks and record their result in the journal (whether
+     or not a dialog was shown); reset the odometer; snapshot the loaded-spool assignment for
+     this job, so a mid-print reassignment cannot retroactively rewrite where filament came from.
 
 4. Every command sent.
    → gcode.sent: odometer consumes G0/G1/G2/G3 E values, honouring M82/M83/G90/G91/G92 and
@@ -644,14 +649,48 @@ does not fire for Cura-sliced files. The sufficiency check still works via the a
 The UI must say *why* a check was skipped rather than showing a silent pass — a green tick that
 means "not checked" is worse than no tick.
 
-Each check is individually toggleable, and each has a **warn / block** mode (default: warn).
+##### The pre-print confirmation dialog
 
-**How "block" actually blocks is an open implementation question (Q-9).** OctoPrint fires
-`PrintStarted` *after* the job has begun, so cancelling there means the printer has already homed and
-may have purged. The candidate approaches — a confirmation dialog before the job starts, refusing the
-first commands at the `gcode.queuing` phase, or cancelling immediately on `PrintStarted` — differ in
-how clean the abort is. Warn mode has no such problem and is the default, so this does not block v1's
-core path.
+The checks are not a scattering of warn/block toggles. They surface in **one dialog shown when the
+user hits Print**, which is the workflow the Spoolman plugin proved and users already expect:
+
+> **Print start → "here is what this job will consume from each spool, plus anything that looks
+> wrong" → Continue or Cancel.**
+
+Contents, per tool: the assigned spool, the **estimated grams this job needs**, the remaining after,
+and any detected problems (unassigned tool, material mismatch, insufficient filament, missing
+density, Filament DB unreachable). Showing the numbers even when nothing is wrong is the point — it
+is the moment the user confirms they loaded what they think they loaded.
+
+Setting: **always show** (default) / **only when there are problems** / **never**.
+
+**Mechanism (Q-9, resolved).** OctoPrint fires `PrintStarted` *after* the job begins, so a backend
+gate cannot cleanly stop it — by then the printer has homed and may have purged. The gate is
+therefore **frontend**: wrap the print function on OctoPrint's own view model and call the original
+only on confirm. Verified against `octoprint-spoolman`, which does exactly this:
+
+```js
+const origPrint = self.printerStateViewModel.print;
+self.printerStateViewModel.print = function confirmBeforeStartPrint() {
+    // show modal; on 'onConfirm' → origPrint()
+};
+```
+
+**Both entry points must be wrapped** — `printerStateViewModel.print` *and* `loadAndPrint` (the
+Files-list "load and print" action). Wrapping only the first leaves a common path ungated.
+
+**This is a UX gate, not a guarantee, and the backend must never depend on it.** It only covers
+prints started from the OctoPrint UI; a job started via the REST API, by a queue plugin, or by any
+other route bypasses the dialog entirely and goes straight to `PrintStarted`. So:
+
+- Metering, snapshotting and commit are driven purely by backend events and work regardless (FR-5,
+  FR-7).
+- The authoritative checks still **run** at `PrintStarted` and record their results in the journal,
+  even when no dialog was shown. A bypassed dialog must never mean an unchecked, unrecorded print.
+
+**Fragility to watch:** monkey-patching another view model's method is inherently brittle, and
+OctoPrint 2.0 changed several view models. Verify against 2.0 and fail soft — if the wrap cannot be
+applied, log it and fall back to notification-only warnings rather than breaking the Print button.
 
 **Use `GET /api/filaments/:id/spool-check?weight=N` rather than computing net remaining locally.**
 Filament DB's own endpoint already handles three things the plugin would otherwise reimplement and
@@ -1477,7 +1516,7 @@ dev instance, and the upstream sources. Kept here as the answer record rather th
 | ~~Q-6~~ | ~~Does `POST /api/print-history` require `spoolId`?~~ **RESOLVED: it is optional — and that is exactly why we must always send it.** Omitting it makes Filament DB pick `first non-retired spool with totalWeight > 0`, falling back to `first non-retired spool`. That is an implicit choice the user never made. Always send `spoolId` explicitly. | — | Done |
 | ~~Q-7~~ | ~~Does OctoPrint fire `PrintPaused` during a firmware-driven MMU change?~~ **RESOLVED by source inspection: no.** `PRINT_PAUSED` fires from exactly one place (`printer/standard.py:1395`), reachable only via a host-side pause, an `// action:pause`/`paused` command, or a command in `pausingCommands`. The capture has none of the three. **See the `pausingCommands` finding below — it is worse than expected.** | — | Done (hardware confirmation still welcome) |
 | ~~Q-8~~ | ~~Which hook exposes received lines?~~ **RESOLVED: `octoprint.comm.protocol.gcode.received`**, present in 2.0. Also available: `.queuing` / `.queued` / `.sending` / `.sent` / `.error`, `octoprint.comm.protocol.action`, `.atcommand.*`, `.firmware.*`, `.temperatures.received`. | — | Done |
-| Q-9 | **How does a pre-print check in "block" mode actually stop a print?** `PrintStarted` fires *after* the job begins, so cancelling there means the printer has already homed and possibly purged. | FR-4 block mode only — **not** the default, so it does not block v1's core path | Compare a pre-start confirmation dialog, refusing commands at `gcode.queuing`, and cancel-on-`PrintStarted`. Check how `octoprint-spoolman` gates its own pre-print verification. |
+| ~~Q-9~~ | ~~How does a pre-print check actually stop a print?~~ **RESOLVED: frontend wrap.** `octoprint-spoolman` replaces `printerStateViewModel.print` (**and** `loadAndPrint`) with a function that shows a modal and calls the original only on confirm. A backend gate cannot work — `PrintStarted` fires after the job begins. **UX gate only:** REST-API-started prints bypass it, so backend checks and commit must not depend on the dialog having run. | — | Done |
 
 ## Upstream asks (file as issues)
 
