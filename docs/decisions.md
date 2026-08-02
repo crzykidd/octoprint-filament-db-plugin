@@ -73,6 +73,12 @@ actual routes, not the bridge's notes.
 
 ## 2026-08-02 — NFC is additive; four v1 seams keep it that way
 
+> **⚠️ PARTIALLY SUPERSEDED** by the entry above (same day). Seam 1 below — caching
+> `spools[].instanceId` because Filament DB supposedly has no lookup-by-identifier endpoint — was
+> based on a **false premise**. Those endpoints exist (`GET /api/filaments/match`,
+> `POST /api/nfc/decode`), so tag resolution happens server-side and does not depend on the cache.
+> **Three seams, not four.** Seams 2–4 stand. Kept as written for the history.
+
 NFC spool loading is a **future** version item and is deliberately **not designed** here. The only
 question asked was narrower: does v1 need to change so a later NFC feature doesn't force a redesign?
 Answer: barely.
