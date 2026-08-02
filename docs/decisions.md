@@ -33,6 +33,38 @@ defensively against OctoPrint's own state, and cross-check the per-tool split at
 against the slicer's per-extruder `filament used [mm]` array — if the total agrees but the split
 does not, warn instead of writing a confidently wrong attribution.
 
+## 2026-08-02 — Detail projection resolves inheritance for every conversion-critical field
+
+Tested rather than assumed, after the reasonable proposition that "Filament DB combines the values
+so we never need to worry where we look." **Correct for what the plugin actually needs** — with two
+exceptions worth knowing.
+
+Built a parent with every field set and a variant with none, then compared both projections. In
+`GET /api/filaments/:id` the variant inherits `density`, `diameter`, `spoolWeight`,
+`netFilamentWeight`, `cost`, and `temperatures`. So the rule stands: **read detail for an assigned
+spool and trust it; never walk the parent chain.**
+
+The specific worry that prompted the test was `diameter`, which carries a schema default of 1.75 —
+a default is not inheritance, and had a 2.85 mm parent's variant fallen back to 1.75 the mm→g
+conversion would have been wrong by (2.85/1.75)² ≈ **2.65×**. It inherits correctly. Worth having
+checked; a silent 2.65× error on volumetric conversion would have been very hard to spot from
+plausible-looking gram figures.
+
+Two exceptions:
+
+- **`diameter` is absent from the *list* projection entirely.** The picker's cached list is
+  therefore not sufficient for conversion — detail must be fetched for assigned filaments. (Same
+  finding as Q-1, now with the inheritance dimension confirmed.)
+- **`color` and `lowStockThreshold` do not inherit.** `color` is correct: a variant *is* a colour,
+  so inheriting the parent's would be wrong, and the picker swatch should use the record's own
+  value. `lowStockThreshold` is a genuine gap — a variant reads `null` even when its parent has a
+  threshold, so FR-8's low-stock indicator will not fire for most variants. Decided to treat null
+  as "no indicator" rather than substituting the parent's value, since doing so would contradict
+  what Filament DB's own UI shows. Raise upstream instead of papering over it locally.
+
+Also learned in passing: `type` **is** required on create (a variant without it 400s), unlike
+`density`.
+
 ## 2026-08-02 — Missing density: estimate and disclose, never block or silently guess
 
 The handling was specified but scattered across FR-4, FR-6 and FR-9b, and could not be read off the

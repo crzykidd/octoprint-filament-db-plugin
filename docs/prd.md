@@ -153,7 +153,34 @@ Two consequences, and the second removes work:
 1. The fallback only ever fires for a **root** filament with no density, or a variant whose parent
    also lacks one. Narrower than a naive reading of the schema suggests — but still reachable.
 2. **The plugin never needs to walk the parent chain itself.** Inheritance resolution is the
-   server's job and it already does it in both projections. Do not reimplement it.
+   server's job and it already does it. Do not reimplement it.
+
+##### Verified field resolution — parent(all set) / variant(nothing set)
+
+Measured 2026-08-02 against the live instance, not inferred. **`GET /api/filaments/:id` is the
+authoritative read for an assigned spool** — every conversion-critical field resolves there:
+
+| Field | Parent | List (variant) | Detail (variant) | |
+|---|---|---|---|---|
+| `density` | 1.99 | 1.99 | **1.99** | inherited |
+| `diameter` | 2.85 | *absent* | **2.85** | inherited — **detail only** |
+| `spoolWeight` (tare) | 250 | 250 | **250** | inherited |
+| `netFilamentWeight` | 750 | 750 | **750** | inherited |
+| `cost` | 99 | 99 | **99** | inherited |
+| `temperatures` | 260/90 | 260/90 | **260/90** | inherited |
+| `color` | `#abcdef` | `#808080` | `#808080` | **does NOT inherit** |
+| `lowStockThreshold` | 123 | *null* | *null* | **does NOT inherit** |
+
+Three things to take from this:
+
+- **`diameter` inherits properly — it does not fall back to the 1.75 schema default.** Worth
+  confirming explicitly: a 2.85 mm parent yields 2.85 on the variant. Had it defaulted instead, the
+  mm→g conversion would have been wrong by (2.85/1.75)² ≈ **2.65×** on 2.85 mm filament.
+- **`diameter` is absent from the list projection**, so the picker's cached list is *not* sufficient
+  for conversion. Fetch detail for assigned filaments (FR-6).
+- **Not every field inherits.** `color` correctly does not — a variant *is* a colour, so inheriting
+  the parent's would be wrong; the picker swatch should use the variant's own value. But
+  `lowStockThreshold` not inheriting is a genuine gap that affects FR-8.
 
 ### C-5: The print-history `source` enum has no `"octoprint"` value
 
@@ -388,6 +415,9 @@ a traceback routes to the right file without a search.
   library of a few hundred filaments is a single request; no pagination exists to use.
 - Picker columns: colour swatch, vendor, name, material type, remaining grams, location, label,
   lot number. Sortable; free-text filter across vendor/name/type/label.
+- The list projection is sufficient for the picker — but **not** for conversion, since it omits
+  `diameter` (C-4). The swatch uses the record's **own** `color`, which correctly does not inherit
+  from the parent: a variant *is* a colour.
 - **Retired spools are hidden by default**, with a toggle to show them (mirrors the Spoolman
   plugin's archived-spool behaviour).
 - Selection is per tool index. Assignment is stored in settings as:
@@ -804,6 +834,11 @@ floor at `spoolWeight` when the tare is known, falling back to 0 when it is null
 - Sidebar shows, per tool: colour swatch, vendor + name, remaining grams, a low-stock indicator
   driven by the filament's `lowStockThreshold`, and live metered grams during a print. All
   displayed grams use **2 decimal places** (FR-6 §Precision and rounding).
+- **`lowStockThreshold` does not inherit from the parent** (verified — C-4). A variant with no
+  threshold of its own reads `null` even when its parent has one, so the low-stock indicator simply
+  will not fire for most variants. Treat a null threshold as "no indicator" — **do not** substitute
+  the parent's value, since that would contradict what Filament DB itself shows, and do not invent
+  a default. Worth raising upstream rather than papering over locally.
 - After a commit: a toast naming the job, the grams committed per spool, and a deep link to the
   record in Filament DB (`{FILAMENTDB_URL}/filaments/{filamentId}` — Filament DB has **no
   standalone spool page**, so spool links point at the parent filament).
@@ -1288,6 +1323,11 @@ dev instance, and the upstream sources. Kept here as the answer record rather th
    is unaffected because `spool-check` re-clamps the derived net at 0, so this is low severity —
    but the stored field becomes physically impossible, and `spoolWeight` is nullable so the fallback
    to 0 still needs to exist.
+6. **`hyiger/filament-db`** — make `lowStockThreshold` inherit from the parent like `density`,
+   `diameter`, `spoolWeight` and `cost` already do. Verified 2026-08-02: a variant reads `null` even
+   when its parent has a threshold set, so low-stock warnings never fire for variants — which is
+   most of a typical library. Affects Filament DB's own UI as much as this plugin, so it is worth
+   fixing upstream rather than working around downstream.
 
 ## Success criteria for v1
 
