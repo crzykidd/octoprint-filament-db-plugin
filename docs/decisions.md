@@ -33,6 +33,32 @@ defensively against OctoPrint's own state, and cross-check the per-tool split at
 against the slicer's per-extruder `filament used [mm]` array — if the total agrees but the split
 does not, warn instead of writing a confidently wrong attribution.
 
+## 2026-08-01 — `density` is optional, but inheritance is resolved server-side (C-4 refined)
+
+Tested directly against the live dev instance rather than inferred from the Mongoose schema, after
+the question "density is required, right?" — a reasonable assumption that turns out to be wrong in
+one direction and right in another.
+
+- **It is not required.** `POST /api/filaments` with no `density` is accepted and stores
+  `density: null`, while `diameter` picks up its schema default of 1.75. The null case is real, so
+  the FR-6 fallback chain is necessary.
+- **But both projections resolve it from the parent.** The list route does
+  `$ifNull: ["$density", {$arrayElemAt: ["$_parent.density", 0]}]` and detail applies the same
+  `own ?? parent` rule. Confirmed with a purpose-built parent(1.99)/variant(null) pair: the variant
+  reports **1.99 in both projections**.
+
+This also corrects an earlier reading. "45/45 filaments have a non-null density" was measured off
+the list projection, which is the *inherited* value — not evidence that every record carries its
+own.
+
+Two consequences:
+
+1. **The plugin must never walk the parent chain itself.** The server already does it, in both
+   projections. Reimplementing it would be duplicated logic that silently diverges.
+2. **The fallback is only reachable via a *root* filament with `density: null`.** A null-density
+   *variant* inherits and never reaches it. So the branch needs a deliberate test fixture — left to
+   real data it would never execute and would rot untested. Recorded in the test strategy.
+
 ## 2026-08-01 — Q-1…Q-8 resolved; two answers changed requirements
 
 All eight open questions answered against a live OctoPrint 2.0.0rc4 container, the live Filament DB

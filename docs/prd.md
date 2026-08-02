@@ -132,11 +132,28 @@ and every spool operation is addressed as `(filamentId, spoolId)`. To build a pi
 fetches `GET /api/filaments` (list projection, embedded spools included) and flattens client-side.
 There is no server-side spool search.
 
-### C-4: `density` is nullable, `diameter` is not
+### C-4: `density` is nullable, `diameter` is not — but inheritance is resolved server-side
 
-From `src/models/Filament.ts`: `diameter: { type: Number, default: 1.75, min: 0.01 }` — always
-present. `density: { type: Number, default: null, min: 0 }` — **may be null**, and the mm→g
-conversion is impossible without it. This needs an explicit fallback strategy (FR-6).
+From `src/models/Filament.ts`: `diameter: { type: Number, default: 1.75, min: 0.01 }` — **always
+present**, because the schema default applies. `density: { type: Number, default: null, min: 0 }` —
+**may be null**, and the mm→g conversion is impossible without it.
+
+**Verified empirically against a live instance (2026-08-01), not just read off the schema:**
+
+- Creating a filament with no `density` is **accepted** — it stores `density: null` while
+  `diameter` gets the 1.75 default. So density is genuinely optional and the null case is
+  reachable. The FR-6 fallback chain is necessary, not dead code.
+- **Both projections resolve density from the parent.** The list route does
+  `$ifNull: ["$density", {$arrayElemAt: ["$_parent.density", 0]}]`, and the detail route applies the
+  same `own ?? parent` rule. A variant with no own density and a parent at 1.99 reports **1.99 in
+  both**.
+
+Two consequences, and the second removes work:
+
+1. The fallback only ever fires for a **root** filament with no density, or a variant whose parent
+   also lacks one. Narrower than a naive reading of the schema suggests — but still reachable.
+2. **The plugin never needs to walk the parent chain itself.** Inheritance resolution is the
+   server's job and it already does it in both projections. Do not reimplement it.
 
 ### C-5: The print-history `source` enum has no `"octoprint"` value
 
@@ -580,10 +597,17 @@ defaults to 1.75) and `density` (**nullable** — C-4).
 
 Density fallback chain, in order:
 
-1. The filament's own `density`.
+1. **The density returned by the API** — already `own ?? parent`, because Filament DB resolves
+   variant inheritance server-side in both projections (C-4). **Do not walk the parent chain in the
+   plugin**; it is already done.
 2. A per-material-type default from a settings map (`PLA: 1.24, PETG: 1.27, ABS: 1.04, ASA: 1.07,
    TPU: 1.21, PA: 1.14, PC: 1.20`), matched on the filament's `type`.
 3. A global fallback density setting (default 1.24).
+
+Steps 2–3 fire only for a **root** filament with no density, or a variant whose parent also lacks
+one — verified reachable, but uncommon. That rarity is a testing hazard, not a reason to skip the
+fallback: it means the path will almost never be exercised by accident, so it needs a deliberate
+fixture (see Test strategy).
 
 When the fallback is used, the plugin: logs it, shows a one-time warning in the sidebar naming the
 filament, and appends a note to the print-history record stating the density was estimated. The
@@ -1074,12 +1098,15 @@ parallel with v1 implementation.
 The Filament DB side is **already running** from the `filament-bridge` dev environment at
 `http://crzydev.home.arpa:3000` and is reused as-is rather than standing up a second instance.
 
-**Its scale is modest — 10 filaments / 7 spools as of 2026-08-01**, not the 200+ of the production
-instance. That is fine for functional work but **not** a realistic picker-performance or
-matching test. Two gaps it does not currently exercise: every filament there has a non-null
-`density`, so the FR-6 fallback chain needs a deliberately null-density record to test, and there is
-no large library to check the FR-2 cache/TTL behaviour against. Seed both before calling those
-requirements verified.
+**Scale as of 2026-08-01: 45 filaments / 36 spools**, of which 33 are variants — good coverage of
+the parent/variant model, though still well short of the production instance for picker-performance
+work.
+
+**It does not exercise the FR-6 density fallback**, and that gap is subtler than a record count.
+Every filament returns a non-null density — but for variants that is the *inherited* value, since
+both projections resolve `own ?? parent` (C-4). To reach the fallback you need a **root** filament
+(no `parentId`) with `density: null`; a null-density *variant* will silently inherit and never
+exercise the path. Seed that specific shape before calling FR-6 verified.
 
 All mutable state lives in `private_data/` (gitignored in full) — the OctoPrint volume, scratch
 G-code, keys, notes. Committed test data goes in `tests/fixtures/` instead. Same convention as
@@ -1147,6 +1174,10 @@ block preserved):
 - **Unit** — odometer (fixture-driven, the heaviest suite), mm→g conversion incl. the density
   fallback chain, slicer config-block parser per dialect, commit-payload builder (dedupe, drop
   unassigned, skip-when-zero, field limits).
+
+  **The density fallback needs a deliberate fixture.** It is only reachable via a *root* filament
+  with `density: null` — a null-density variant inherits from its parent and never reaches it
+  (C-4). Left to real data it would never run, and the branch would rot untested.
 - **Integration** — FDB client against a mocked HTTP layer, covering: bearer auth, 401, network
   failure, and the exact `POST /api/print-history` payload shape.
 - **Manual/E2E** — against the real dev Filament DB: print a fixture on the virtual printer, verify

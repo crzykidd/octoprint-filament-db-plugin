@@ -37,8 +37,11 @@ Re-derived by more than one session already; internalize them before touching co
    `source: "job"`). **Never also call `/spools/:id/usage` for the same print** — double-debit.
 2. **Filament DB works in grams, gross weight model.** The plugin owns the mm→g conversion;
    there is no length-based endpoint (Spoolman has one; FDB does not).
-3. **`filament.density` is nullable**, `diameter` is not. The fallback chain is FR-6 — do not
-   silently default and do not skip the user-facing warning.
+3. **`filament.density` is nullable** (verified — creating one without it is accepted);
+   `diameter` always has the 1.75 schema default. **But Filament DB resolves `own ?? parent` for
+   density in BOTH projections — never walk the parent chain yourself.** The FR-6 fallback is
+   therefore only reachable via a *root* filament with `density: null`; don't silently default, and
+   don't skip the user-facing warning.
 4. **OctoPrint 2.0 only.** No 1.x compat shims. Blueprints are CSRF-protected by default;
    `admin_permission` is gone; access APIs are snake_case.
 
@@ -103,10 +106,11 @@ Nothing is in flight. The design is settled and the repo scaffolding is in place
    is optional on `POST /api/print-history`, which is exactly why it must always be sent.
 3. **Formally adopt `code-checkin-and-pr @ 1.2.0`** once CI exists. The branch rule is already
    implemented (`dev` + protected `main`); the CI checks are what's missing.
-4. **Seed two test records in the dev Filament DB** before trusting FR-6/FR-2: a **null-density**
-   filament (the fallback chain is currently untestable — all 10 records have a density) and enough
-   filaments to exercise the picker cache. The dev instance is small (10 filaments / 7 spools),
-   unlike production.
+4. **Seed a null-density ROOT filament in the dev Filament DB** before trusting FR-6. The instance
+   is now 45 filaments / 36 spools (33 variants — good parent/variant coverage), but nothing
+   exercises the density fallback: a null-density *variant* inherits from its parent, so only a
+   root filament with `density: null` reaches that branch. Dev FDB is
+   `http://crzydev.home.arpa:3000`, writable, unauthenticated; clean up `zzz-*` records you create.
 5. **Then implement bottom-up**, in this order — each layer is pure and testable before the
    next depends on it: `metering/odometer.py` → `metering/convert.py` →
    `metering/gcode_meta.py` → `client/filamentdb.py` → `journal.py` → `retry.py` → `job.py` →
