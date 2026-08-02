@@ -95,6 +95,12 @@ Nothing is in flight. The design is settled and the repo scaffolding is in place
 
 **Not yet done — likely next steps, in dependency order:**
 
+**Testing is staged — one new variable per phase. We are on phase 1.**
+**1.** clean OctoPrint 2.0, **no third-party plugins**, **single-extruder** virtual printer — prove
+the core loop end to end. **2.** real single-tool hardware. **3.** MMU (`mmu5` profile, then the real
+Core One + MMU). **4.** plugin coexistence (`Octoprint-PrusaMMU`). Most documented risk is phase 3+;
+don't let it complicate phase 1. Do not install other plugins in the dev instance yet.
+
 1. **Bring up the dev environment and confirm it works.**
    `docker compose -f docker-compose.dev.yml up -d --build` → http://localhost:5000. The compose
    and `Dockerfile.dev` are written but **have never been run** — verify the 2.0 RC upgrade

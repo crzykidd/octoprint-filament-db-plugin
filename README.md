@@ -86,14 +86,18 @@ OctoPrint comes up on **http://localhost:5000**. Override with `OCTOPRINT_PORT` 
 ### First-run setup
 
 1. Walk the OctoPrint setup wizard and create your user account.
-2. **Connect to the `VIRTUAL` port** — the virtual printer is enabled for you on first start
-   (`plugins.virtual_printer` in `private_data/octoprint/octoprint/config.yaml`, 5 extruders).
-3. **Pick the printer profile that matches what you're testing.** A
-   *Virtual MMU (5 tools, shared nozzle)* profile is pre-created. This matters more than it looks:
-   OctoPrint does **not** detect an MMU's tool count, and neither does the PrusaMMU plugin — see
-   FR-3 in the PRD for why getting it wrong silently mis-attributes filament.
-4. In the plugin's settings, point **Filament DB URL** at your instance and add an API key if it
+2. **Connect to the `VIRTUAL` port** — the virtual printer is enabled on first start
+   (`plugins.virtual_printer` in `private_data/octoprint/octoprint/config.yaml`), configured as
+   **single-extruder** for phase 1.
+3. In the plugin's settings, point **Filament DB URL** at your instance and add an API key if it
    sets `FILAMENTDB_API_KEY`.
+4. **Install no other plugins.** Phase 1 is deliberately a clean instance — a third-party plugin
+   touching the G-code stream is exactly the variable phase 4 exists to introduce.
+
+For phase 3, switch the printer profile to *Virtual MMU (5 tools, shared nozzle)* and set
+`plugins.virtual_printer.numExtruders: 5`. Getting the profile right matters more than it looks:
+OctoPrint does **not** detect an MMU's tool count, and neither does the PrusaMMU plugin — see FR-3
+for why getting it wrong silently mis-attributes filament.
 
 To re-seed steps 2–3 from scratch, delete `private_data/octoprint/` and bring the stack back up.
 
@@ -131,13 +135,34 @@ capture at `tests/fixtures/serial/`, which is worth reading before touching the 
 
 ### Testing workflow
 
-Testing happens in two places, and it is worth being explicit about which one proves what.
+**Add one variable at a time.** Each phase below introduces exactly one new source of complexity, so
+when something breaks it is obvious what caused it. Do not skip ahead — most of the hard-won findings
+in [`docs/decisions.md`](docs/decisions.md) came from later phases, and debugging them against an
+unproven core would have been miserable.
+
+| Phase | Setup | Proves |
+|---|---|---|
+| **1. Core loop** ← *current* | Docker, OctoPrint 2.0, **no third-party plugins**, **single-extruder** virtual printer | assign a spool → print → meter → convert → commit → journal. The whole v1 happy path with one tool and one spool. |
+| **2. Real hardware, single tool** | a Prusa printer, still no other plugins | real timing, real serial behaviour, real cancel/failure — things the virtual printer cannot fake |
+| **3. Multi-tool / MMU** | the `mmu5` profile, then the real Core One + MMU | per-tool attribution, tool changes, FR-3's slot-count union, runout and jam handling |
+| **4. Plugin coexistence** | add `Octoprint-PrusaMMU` | tool remapping, `Tx` interception, the overlapping "which spool is in slot N" question (PRD §Known plugin interactions) |
+
+Most of the documented risk — MMU tool attribution, command remapping, `echo:MMU2:` parsing — lives
+in phases 3 and 4. **The phase-1 core loop is genuinely simple**: one tool, one spool, one
+accumulator. Getting it solid first keeps that complexity off the critical path, and single-extruder
+is the majority case for real users anyway.
+
+The dev container ships configured for phase 1. An `mmu5` printer profile
+(*Virtual MMU, 5 tools, shared nozzle*) is already on disk for phase 3 — switch to it in OctoPrint's
+printer-profile settings when you get there.
+
+Beyond the phases, testing happens in two places, and it is worth being explicit about which one
+proves what.
 
 **1. Docker + virtual printer — logic.** Everything that is pure computation is tested here and in
 unit tests: the extrusion odometer, mm→gram conversion, slicer-metadata parsing, commit-payload
-construction, the write journal and its retry states. The virtual printer is configured with 5
-extruders and a shared-nozzle profile, so multi-tool code paths are exercised by default. This
-covers most of the plugin and needs no hardware.
+construction, the write journal and its retry states. This covers most of the plugin and needs no
+hardware.
 
 **2. A real Prusa printer — behaviour the virtual printer cannot fake.** Anything involving how a
 printer *actually behaves* is validated against real hardware: firmware-initiated pauses, MMU

@@ -1468,15 +1468,26 @@ G-code, keys, notes. Committed test data goes in `tests/fixtures/` instead. Same
   plugins:
     virtual_printer:
       enabled: true
-      numExtruders: 5        # exercises the MMU path by default
+      numExtruders: 1        # phase 1 — single tool; raise to 5 for phase 3
       hasBed: true
+    _disabled: [softwareupdate]
   ```
+
+  **Testing is staged, one new variable per phase** (see the README's Testing workflow for the full
+  table): **1.** clean instance, no third-party plugins, single extruder — the core loop;
+  **2.** real single-tool hardware; **3.** MMU (`mmu5` profile, then the real Core One + MMU);
+  **4.** plugin coexistence, notably `Octoprint-PrusaMMU`.
+
+  Most of the documented risk — per-tool attribution, tool remapping, `echo:MMU2:` parsing — is
+  phase 3+. The phase-1 loop is one tool, one spool, one accumulator, which keeps that complexity
+  off the critical path. Single-extruder is also the majority real-world case.
 
   **Confirmed against a live 2.0.0rc4 container (Q-3).** Despite 2.0 moving serial handling into the
   bundled `serial_connector` plugin, `virtual_printer` remains a separate bundled plugin with the
   same settings key and the same `numExtruders` / `hasBed` options, registering port `VIRTUAL`
   through a serial factory. The snippet above is correct as written.
-- A second profile with a **single-extruder** printer profile, for the non-MMU path.
+- The single-extruder `_default` profile is the phase-1 default; an `mmu5` profile
+  (5 tools, shared nozzle) ships alongside it for phase 3.
 - **The bundled Software Update plugin must be disabled** (`plugins._disabled: [softwareupdate]`).
   OctoPrint ranks 1.11.8 as the latest *stable* and 2.0.0rc4 as a prerelease, so the updater offers
   a **downgrade off the target version**, which silently destroys the dev environment. Belt and
