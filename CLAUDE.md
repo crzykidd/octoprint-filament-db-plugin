@@ -24,6 +24,11 @@ the v1 spec and it contains hard constraints that are expensive to rediscover, i
 - `filament.density` is **nullable**; `filament.diameter` is not.
 - Target is **OctoPrint 2.0 only**. No 1.x compat shims.
 
+**Stay in scope.** The plugin reads seven fields off a Filament DB filament — `_id`, `density`,
+`diameter`, `type`, `vendor`/`name`, `color`, and the spool sub-fields (PRD C-3a). The document has
+~40. Do not audit, display, sync, or file upstream issues about fields the plugin does not use.
+v1 is: pick a spool per tool, meter the print, write one print-history record back. Nothing else.
+
 Current status: **pre-alpha, design only — no application code yet.**
 
 **Licence: AGPLv3. All code must be original.** Prior art (notably

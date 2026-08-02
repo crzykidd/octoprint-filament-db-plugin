@@ -125,6 +125,27 @@ use `GET /api/filaments/:id/spool-check` (FR-4), which resolves inheritance and 
 already. Second, **writes debit the gross while checks read the net**, which is what makes the
 over-usage case in FR-7 behave the way it does.
 
+### C-3a: The fields this plugin reads — and only these
+
+Filament DB's filament document has ~40 fields. **The plugin reads seven of them.** Anything else
+is out of scope; do not audit, sync, display, or file upstream issues about fields the plugin does
+not use.
+
+| Field | Used for |
+|---|---|
+| `_id` | identity, deep links |
+| `density` | mm→g conversion (FR-6) |
+| `diameter` | mm→g conversion (FR-6) |
+| `type` | material-mismatch check (FR-4) |
+| `vendor`, `name` | picker + sidebar display |
+| `color` | picker + sidebar swatch |
+| `spools[]` → `_id`, `label`, `totalWeight`, `retired`, `locationId` | picker, assignment, commit |
+
+Net remaining and tare are **never computed locally** — `GET /api/filaments/:id/spool-check` does
+that server-side (FR-4). Everything else on the document — cost, temperatures, calibrations,
+presets, drying, mechanical properties, stock thresholds — belongs to Filament DB and is none of
+this plugin's business.
+
 ### C-3: Spools are embedded subdocuments, not a collection
 
 There is no standalone spool endpoint. Every spool lives in `spools[]` on its filament document,
@@ -157,30 +178,28 @@ Two consequences, and the second removes work:
 
 ##### Verified field resolution — parent(all set) / variant(nothing set)
 
-Measured 2026-08-02 against the live instance, not inferred. **`GET /api/filaments/:id` is the
-authoritative read for an assigned spool** — every conversion-critical field resolves there:
+Measured 2026-08-02 against the live instance, not inferred, for **the fields this plugin reads**.
+**`GET /api/filaments/:id` is the authoritative read for an assigned spool** — read it and trust it.
 
-| Field | Parent | List (variant) | Detail (variant) | |
-|---|---|---|---|---|
-| `density` | 1.99 | 1.99 | **1.99** | inherited |
-| `diameter` | 2.85 | *absent* | **2.85** | inherited — **detail only** |
-| `spoolWeight` (tare) | 250 | 250 | **250** | inherited |
-| `netFilamentWeight` | 750 | 750 | **750** | inherited |
-| `cost` | 99 | 99 | **99** | inherited |
-| `temperatures` | 260/90 | 260/90 | **260/90** | inherited |
-| `color` | `#abcdef` | `#808080` | `#808080` | **does NOT inherit** |
-| `lowStockThreshold` | 123 | *null* | *null* | **does NOT inherit** |
+| Field | Used for | Parent | List (variant) | Detail (variant) | |
+|---|---|---|---|---|---|
+| `density` | mm→g conversion | 1.99 | 1.99 | **1.99** | inherited |
+| `diameter` | mm→g conversion | 2.85 | *absent* | **2.85** | inherited — **detail only** |
+| `type` | material check (FR-4) | required on create; always present | — | — | n/a |
+| `color` | picker/sidebar swatch | `#abcdef` | `#808080` | `#808080` | own value, by design |
 
-Three things to take from this:
+Two things to take from this:
 
 - **`diameter` inherits properly — it does not fall back to the 1.75 schema default.** Worth
   confirming explicitly: a 2.85 mm parent yields 2.85 on the variant. Had it defaulted instead, the
   mm→g conversion would have been wrong by (2.85/1.75)² ≈ **2.65×** on 2.85 mm filament.
 - **`diameter` is absent from the list projection**, so the picker's cached list is *not* sufficient
-  for conversion. Fetch detail for assigned filaments (FR-6).
-- **Not every field inherits.** `color` correctly does not — a variant *is* a colour, so inheriting
-  the parent's would be wrong; the picker swatch should use the variant's own value. But
-  `lowStockThreshold` not inheriting is a genuine gap that affects FR-8.
+  for conversion. Fetch detail for assigned filaments (FR-6). `color` correctly does not inherit —
+  a variant *is* a colour — so the swatch uses the record's own value.
+
+Other filament fields (`cost`, `temperatures`, `netFilamentWeight`, `lowStockThreshold`, …) are out
+of scope: the plugin does not read them. Tare and net-remaining are never computed locally either —
+`spool-check` does that server-side (FR-4).
 
 ### C-5: The print-history `source` enum has no `"octoprint"` value
 
@@ -831,14 +850,8 @@ floor at `spoolWeight` when the tare is known, falling back to 0 when it is null
 
 #### FR-8: Result reporting in the UI
 
-- Sidebar shows, per tool: colour swatch, vendor + name, remaining grams, a low-stock indicator
-  driven by the filament's `lowStockThreshold`, and live metered grams during a print. All
-  displayed grams use **2 decimal places** (FR-6 §Precision and rounding).
-- **`lowStockThreshold` does not inherit from the parent** (verified — C-4). A variant with no
-  threshold of its own reads `null` even when its parent has one, so the low-stock indicator simply
-  will not fire for most variants. Treat a null threshold as "no indicator" — **do not** substitute
-  the parent's value, since that would contradict what Filament DB itself shows, and do not invent
-  a default. Worth raising upstream rather than papering over locally.
+- Sidebar shows, per tool: colour swatch, vendor + name, remaining grams, and live metered grams
+  during a print. All displayed grams use **2 decimal places** (FR-6 §Precision and rounding).
 - After a commit: a toast naming the job, the grams committed per spool, and a deep link to the
   record in Filament DB (`{FILAMENTDB_URL}/filaments/{filamentId}` — Filament DB has **no
   standalone spool page**, so spool links point at the parent filament).
@@ -1323,11 +1336,6 @@ dev instance, and the upstream sources. Kept here as the answer record rather th
    is unaffected because `spool-check` re-clamps the derived net at 0, so this is low severity —
    but the stored field becomes physically impossible, and `spoolWeight` is nullable so the fallback
    to 0 still needs to exist.
-6. **`hyiger/filament-db`** — make `lowStockThreshold` inherit from the parent like `density`,
-   `diameter`, `spoolWeight` and `cost` already do. Verified 2026-08-02: a variant reads `null` even
-   when its parent has a threshold set, so low-stock warnings never fire for variants — which is
-   most of a typical library. Affects Filament DB's own UI as much as this plugin, so it is worth
-   fixing upstream rather than working around downstream.
 
 ## Success criteria for v1
 

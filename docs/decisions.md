@@ -39,10 +39,9 @@ Tested rather than assumed, after the reasonable proposition that "Filament DB c
 so we never need to worry where we look." **Correct for what the plugin actually needs** — with two
 exceptions worth knowing.
 
-Built a parent with every field set and a variant with none, then compared both projections. In
-`GET /api/filaments/:id` the variant inherits `density`, `diameter`, `spoolWeight`,
-`netFilamentWeight`, `cost`, and `temperatures`. So the rule stands: **read detail for an assigned
-spool and trust it; never walk the parent chain.**
+Built a parent with fields set and a variant with none, then compared both projections. In
+`GET /api/filaments/:id` the variant inherits `density` and `diameter`. So the rule stands: **read
+detail for an assigned spool and trust it; never walk the parent chain.**
 
 The specific worry that prompted the test was `diameter`, which carries a schema default of 1.75 —
 a default is not inheritance, and had a 2.85 mm parent's variant fallen back to 1.75 the mm→g
@@ -50,20 +49,21 @@ conversion would have been wrong by (2.85/1.75)² ≈ **2.65×**. It inherits co
 checked; a silent 2.65× error on volumetric conversion would have been very hard to spot from
 plausible-looking gram figures.
 
-Two exceptions:
-
-- **`diameter` is absent from the *list* projection entirely.** The picker's cached list is
-  therefore not sufficient for conversion — detail must be fetched for assigned filaments. (Same
-  finding as Q-1, now with the inheritance dimension confirmed.)
-- **`color` and `lowStockThreshold` do not inherit.** `color` is correct: a variant *is* a colour,
-  so inheriting the parent's would be wrong, and the picker swatch should use the record's own
-  value. `lowStockThreshold` is a genuine gap — a variant reads `null` even when its parent has a
-  threshold, so FR-8's low-stock indicator will not fire for most variants. Decided to treat null
-  as "no indicator" rather than substituting the parent's value, since doing so would contradict
-  what Filament DB's own UI shows. Raise upstream instead of papering over it locally.
+One exception that matters: **`diameter` is absent from the *list* projection entirely.** The
+picker's cached list is therefore not sufficient for conversion — detail must be fetched for
+assigned filaments. (Same finding as Q-1, now with the inheritance dimension confirmed.) `color`
+correctly does not inherit — a variant *is* a colour — so the swatch uses the record's own value.
 
 Also learned in passing: `type` **is** required on create (a variant without it 400s), unlike
 `density`.
+
+**Scope correction (same day).** This investigation also catalogued `cost`, `temperatures`,
+`netFilamentWeight` and `lowStockThreshold`, and produced an upstream ask about
+`lowStockThreshold` inheritance. **All of that was out of scope and has been removed** — the plugin
+does not read those fields. The root cause was mine: the first PRD draft put a low-stock indicator
+into FR-8 that the user never asked for, and the field audit then inherited that invented scope.
+FR-8's low-stock indicator is deleted along with it. **The fields this plugin reads are `density`,
+`diameter`, `type`, `color`, `vendor`, `name`, and the spool sub-fields — nothing else.**
 
 ## 2026-08-02 — Missing density: estimate and disclose, never block or silently guess
 
