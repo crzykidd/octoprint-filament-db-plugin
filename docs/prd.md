@@ -488,6 +488,7 @@ Checks performed:
 | Check | Requires | Behaviour |
 |---|---|---|
 | **No spool assigned** | — | Warn per unassigned tool that the G-code actually uses. |
+| **Assigned spool has no density** | — | Warn that usage will be **estimated**, naming the filament, with a deep link to fix it in Filament DB. Fires here — at file-select — because that is when the fix is cheap. See FR-6 §What actually happens when there is no density. |
 | **Material mismatch** | slicer block | Warn when `filament_type[n]` ≠ the assigned spool's `type` (case-insensitive, trimmed). |
 | **Insufficient filament** | slicer block *or* analysis | Warn when required grams exceed the spool's remaining **net** filament, minus a configurable safety buffer (default 0 g). Use Filament DB's own `spool-check` endpoint — see below. |
 | **Filament DB unreachable** | — | Warn that usage will not be recorded. |
@@ -609,10 +610,47 @@ one — verified reachable, but uncommon. That rarity is a testing hazard, not a
 fallback: it means the path will almost never be exercised by accident, so it needs a deliberate
 fixture (see Test strategy).
 
-When the fallback is used, the plugin: logs it, shows a one-time warning in the sidebar naming the
-filament, and appends a note to the print-history record stating the density was estimated. The
-user should be nudged to fix the record in Filament DB rather than have an estimate quietly become
-permanent inventory truth.
+##### What actually happens when there is no density
+
+The plugin always knows the **length** exactly — the odometer counts millimetres. Filament DB
+accepts only **grams**. Density is the sole bridge between them, so a missing density means the
+conversion cannot be done from measurement alone. The handling is three-layered: warn early,
+degrade honestly, stay correctable.
+
+**1. Prevent — warn at file-select, not at commit.** The pre-print check (FR-4) already runs on
+`FileSelected`. It flags a loaded spool whose filament has no density **then**, while the print
+hasn't started and the fix takes ten seconds, with a deep link straight to that filament in
+Filament DB. Discovering it after a 12-hour print is the failure this exists to avoid.
+
+**2. Degrade — estimate, commit, and mark it everywhere.** If the user prints anyway, the job is
+**never dropped and never silently guessed**. Grams are computed from the material-type default,
+the usage commits normally, and the estimate is disclosed in four places: the commit toast, the
+journal row (FR-9b), the print-history `notes` field in Filament DB, and the plugin log.
+
+Accuracy is worth being honest about, because it varies wildly:
+
+- **Common unfilled materials cluster tightly** — PLA ≈ 1.24, PETG ≈ 1.27, ABS ≈ 1.04. A
+  type-matched default is typically within 1–3%, comfortably inside the ±2–3% that filament
+  diameter tolerance already imposes. The estimate costs almost nothing.
+- **Filled and exotic materials do not** — wood-, metal-, glow- and carbon-filled blends and TPU
+  range from ~1.1 to over 2.0. A default can be **30%+ wrong**. When the filament's `type` is not
+  in the map and the global fallback is used, say so specifically rather than reusing the mild
+  wording from the common case.
+
+**3. Recover — the journal keeps the raw millimetres.** FR-9b records metered mm per tool
+alongside the computed grams and a `density_estimated` flag. So once a real density is entered in
+Filament DB, the entry can be recomputed exactly and the correction applied — the measurement was
+never lost, only the conversion was uncertain. This is why the journal stores mm and not just the
+final grams.
+
+**Setting: `onMissingDensity` — `estimate` (default) | `block`.** `block` refuses the print in the
+pre-print check for users who would rather fix the data than carry an estimate. There is
+deliberately no "commit zero" or "skip silently" option: both quietly under-report real consumption,
+which is the one outcome worse than an estimate.
+
+**The plugin never writes a density back to Filament DB.** Guessing a value into the material
+database would turn a one-job estimate into permanent library truth, and v1 writes print-history
+records only (C-1).
 
 **Confirmed against a live instance (Q-1): the list projection carries `density` but NOT
 `diameter`.** The full list projection is `_id, color, cost, density, hasCalibrations, hasVariants,
@@ -817,7 +855,12 @@ need compaction and would drift.
 |---|---|
 | job label, file path | as sent in `jobLabel` |
 | started / ended timestamps, terminal state | done / failed / cancelled |
-| per-tool detail | spool (filament id, spool id, display name), metered mm, computed grams, whether density was estimated |
+| per-tool detail | spool (filament id, spool id, display name), **metered mm**, computed grams, `density_estimated` flag + the density value actually used |
+
+**Metered millimetres are stored, not just the final grams.** That is deliberate: length is the
+measurement, grams are a derived value, and the derivation can be wrong when density was estimated
+(FR-6). Keeping mm means such an entry can be **recomputed exactly** once a real density exists,
+instead of the measurement being lost to a bad conversion.
 | the exact payload sent | verbatim, so it can be replayed or pasted into a bug report |
 | outcome state | see state machine below |
 | attempt count + timestamp and error of each attempt | HTTP status, reason, response body excerpt |

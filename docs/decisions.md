@@ -33,6 +33,39 @@ defensively against OctoPrint's own state, and cross-check the per-tool split at
 against the slicer's per-extruder `filament used [mm]` array — if the total agrees but the split
 does not, warn instead of writing a confidently wrong attribution.
 
+## 2026-08-02 — Missing density: estimate and disclose, never block or silently guess
+
+The handling was specified but scattered across FR-4, FR-6 and FR-9b, and could not be read off the
+document as a single answer. Consolidated into FR-6 §"What actually happens when there is no
+density". The reasoning, recorded because the alternatives are all defensible:
+
+The plugin always knows **length** exactly; Filament DB accepts only **grams**; density is the sole
+bridge. Three options:
+
+- **Block the commit** — never writes a wrong number, but loses real usage if the user doesn't act.
+  Hostile after a long print. Kept as an opt-in setting, not the default.
+- **Estimate silently** — rejected outright. An invented number entering inventory as though it
+  were measured is the worst outcome available.
+- **Estimate, disclose, stay correctable** — chosen.
+
+Three layers: **warn at `FileSelected`** (when the fix costs ten seconds, not after a 12-hour
+print); **estimate from the material-type default and disclose in four places** (toast, journal row,
+print-history `notes`, log); **keep the raw millimetres in the journal** so the entry can be
+recomputed exactly once a real density exists.
+
+That last point is why FR-9b stores metered mm and not just grams — length is the measurement,
+grams are derived, and only the derivation is uncertain.
+
+Accuracy honesty drove the wording: unfilled PLA/PETG/ABS cluster tightly enough that a type-matched
+default lands within 1–3%, inside the ±2–3% that diameter tolerance already imposes. Filled and
+exotic blends (wood, metal, glow, CF, TPU) span ~1.1–2.0+ and can be 30%+ wrong, so the
+unknown-type path must warn differently rather than reusing the mild common-case wording.
+
+Explicitly rejected: writing a guessed density **back** to Filament DB. That would promote a
+one-job estimate to permanent library truth, and v1 writes print-history only (C-1). Also rejected:
+any "commit zero" or "skip silently" option — both under-report real consumption, which is worse
+than a disclosed estimate.
+
 ## 2026-08-01 — `density` is optional, but inheritance is resolved server-side (C-4 refined)
 
 Tested directly against the live dev instance rather than inferred from the Mongoose schema, after
