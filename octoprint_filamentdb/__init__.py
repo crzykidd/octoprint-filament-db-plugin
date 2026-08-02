@@ -3,8 +3,9 @@
 """Plugin entry point: the ``__plugin_*__`` contract OctoPrint's loader reads.
 
 OWNS: plugin metadata (name, identifier, version, description, licence,
-    Python compatibility), instantiating ``FilamentDBPlugin``, and wiring the
-    ``octoprint.access.permissions`` hook to its declaration.
+    Python compatibility), instantiating ``FilamentDBPlugin``, and wiring
+    the ``octoprint.access.permissions`` and ``octoprint.comm.protocol.
+    gcode.sent`` hooks to their handlers.
 DOES NOT OWN: the mixin implementation (``plugin.py``) or the permission
     definitions themselves (also ``plugin.py`` -- see the CLAUDE.md task
     routing table). This file only registers what those provide.
@@ -33,4 +34,5 @@ def __plugin_load__():
     __plugin_implementation__ = FilamentDBPlugin()
     __plugin_hooks__ = {
         "octoprint.access.permissions": get_permissions,
+        "octoprint.comm.protocol.gcode.sent": __plugin_implementation__.on_gcode_sent,
     }

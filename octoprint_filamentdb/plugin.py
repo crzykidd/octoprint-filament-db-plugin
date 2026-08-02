@@ -3,13 +3,17 @@
 """OctoPrint plugin wiring: mixin composition and lifecycle only.
 
 OWNS: the ``FilamentDBPlugin`` mixin class -- the settings/template/asset
-    declarations OctoPrint calls directly, startup logging, and the
+    declarations OctoPrint calls directly, startup logging, the
     ``octoprint.access.permissions`` hook (FR-10; see the CLAUDE.md task
-    routing table).
+    routing table), and forwarding the ``gcode.sent`` hook / print-lifecycle
+    events to ``job.MeteringSession`` -- plus the one presentation step of
+    formatting its state into a ``send_plugin_message`` payload for the
+    live sidebar readout.
 DOES NOT OWN: any decision logic. This is the file PRD rule N-5 is about --
     the moment a method here does more than call into another module or
-    return a fixed shape, it has outgrown this file. Print-lifecycle
-    handling lands in job.py, not in on_event() below.
+    return a fixed shape, it has outgrown this file. Every decision about
+    *when* the odometer runs, resets, or is due for a throttled push lives
+    in ``job.MeteringSession``, not here.
 """
 
 from octoprint.access import ADMIN_GROUP, USER_GROUP
@@ -23,6 +27,7 @@ from octoprint.plugin import (
 
 from . import settings_keys
 from ._version import __version__
+from .job import MeteringSession
 
 
 def get_permissions():
@@ -72,6 +77,12 @@ class FilamentDBPlugin(
     EventHandlerPlugin,
 ):
     """Mixin composition root for the ``filamentdb`` plugin. Wiring only (N-5)."""
+
+    def __init__(self):
+        super().__init__()
+        # One session for the plugin's lifetime; job.py owns everything
+        # about when it resets, accumulates, and is due for a push.
+        self._lifecycle = MeteringSession()
 
     # -- SettingsPlugin -------------------------------------------------
 
@@ -128,8 +139,38 @@ class FilamentDBPlugin(
     # -- EventHandlerPlugin -----------------------------------------------
 
     def on_event(self, event, payload):
-        # Registered now so the print-lifecycle hook exists; the actual
-        # start/pause/resume/terminal handling lands in job.py (not yet
-        # written -- see prompts/startnewsession.md for sequencing) and gets
-        # delegated to from here.
-        pass
+        # job.py decides whether this event starts, stops, or is
+        # irrelevant to metering (including collapsing the
+        # PrintCancelled-then-PrintFailed double-fire into a single
+        # stop). An immediate push on a real transition means the sidebar
+        # shows "reset to zero" / "stopped, final total" right away
+        # rather than waiting for the next throttle tick.
+        if self._lifecycle.handle_event(event):
+            self._push_odometer_state()
+
+    # -- gcode.sent hook (the odometer feed) -------------------------------
+
+    def on_gcode_sent(
+        self, comm_instance, phase, cmd, cmd_type, gcode, subcode=None, tags=None
+    ):
+        # job.py decides whether this line counts (only while a print is
+        # actually in progress) and whether a throttled push is due.
+        # Never returns a replacement -- this hook only observes.
+        self._lifecycle.feed(cmd)
+        if self._lifecycle.accumulating and self._lifecycle.should_push():
+            self._push_odometer_state()
+
+    def _push_odometer_state(self):
+        # SockJS push to the frontend (PRD §"Being consumable by
+        # dashboards and other plugins", channel 3); the JS side receives
+        # this via onDataUpdaterPluginMessage. Formatting a fixed-shape
+        # dict from already-decided state is presentation, not a
+        # decision, so it stays here rather than in job.py.
+        self._plugin_manager.send_plugin_message(
+            self._identifier,
+            {
+                "type": "odometer",
+                "printing": self._lifecycle.accumulating,
+                "totals": self._lifecycle.totals,
+            },
+        )

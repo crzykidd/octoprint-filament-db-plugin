@@ -6,6 +6,101 @@ reader would otherwise have to re-derive.
 
 ---
 
+## 2026-08-02 — Live raw-mm odometer: G90/G91-vs-M82/M83 semantics, job.py's role, and a
+resend double-count bug for step 3
+
+Step 2 of `prompts/startnewsession.md`'s build order: `metering/odometer.py` (pure
+accumulator), `job.py` (new — print-lifecycle metering session), the `gcode.sent` hook and
+`on_event` wiring in `plugin.py`, and the live sidebar readout
+(`static/js/filamentdb.js`/`filamentdb_sidebar.jinja2`). Verified end to end against the
+running dev container: unit tests, a clean restart, a Playwright browser check (idle and
+live), and the acceptance print itself.
+
+**1. Extrusion-mode resolution algorithm — the PRD names the interaction but not the
+algorithm.** FR-5 says to track both `M82`/`M83` and `G90`/`G91` and "resolve per firmware
+convention, defaulting to Marlin behaviour," but doesn't spell out the precedence. Implemented
+stock Marlin's actual semantics: `G90`/`G91` set *all* axes together, including E, while
+`M82`/`M83` override *only* E independently — so a later `G90`/`G91` resets E mode back in
+step with position mode, discarding any standing `M82`/`M83` override. This rarely matters in
+practice (slicers issue `M83` once near the top and never reissue `G90`/`G91` mid-print), but
+it's the literal firmware behaviour rather than a simplification, and it's covered by
+`tests/test_odometer.py::test_g90_g91_govern_e_when_no_explicit_m82_m83_override`.
+
+**2. `job.py` created now, minimal, as the home for print-lifecycle *decisions* — not just
+promised by the Architecture diagram.** The prompt's own instructions describe the hook/event
+wiring as living in `plugin.py` but say decisions must stay out of it (N-5). Rather than invent
+a new module, `job.py` was created per the PRD's pre-existing Architecture table (which already
+named it "print lifecycle: start/pause/resume/terminal → commit") and given exactly this step's
+slice: `MeteringSession` owns when the odometer resets/accumulates/stops and the ~1/s push
+throttle. It does **not** yet own commit/journal/retry — those land with their own steps. This
+keeps `job.py`'s eventual full scope (per Architecture) growing additively rather than needing a
+later restructure.
+
+**3. Cancel's `PrintCancelled`-then-`PrintFailed` double-fire is handled by idempotency, not by
+special-casing cancel.** `MeteringSession.handle_event()` treats every terminal event
+identically: the first one stops accumulation and returns `True` (triggering a push); a second
+terminal event received while already stopped is a no-op returning `False`. This satisfies "do
+not double-handle" without needing to know cancel specifically produces two events — it's
+correct regardless of which terminal events actually fire, in what order, or how many.
+
+**4. Found, NOT fixed (deliberately out of scope): a resend re-fires `gcode.sent`, so the
+odometer double-counts it.** Confirmed in the running container's OctoPrint 2.0.0rc4 source,
+`serial_connector/serial_comm.py`: `_resendNextCommand` (~4566) calls `_enqueue_for_sending(cmd,
+linenumber=..., resend=True)`, which enqueues directly; the send loop then fires
+`_process_command_phase("sent", ...)` (~4872) same as any other command. No tag distinguishes
+it — the resend path passes no `tags`, so `tags=None` at the hook, identical to a first-time
+send. Notably, the **normal** path also fires `_process_command_phase("queuing", ...)` (~4624)
+*before* enqueueing, but the resend path skips `queuing` entirely — that asymmetry (present on
+`sent` but absent on `queuing`) is the shape of the eventual fix: filter in the `sent` handler
+using information only the `queuing` phase would have seen, or track line numbers already
+accounted for. **Not fixed here** — it's step-3 hardening (`metering/odometer.py` already
+correctly ignores commands it can't interpret; recognizing "this exact line was already
+counted" needs state this pure accumulator doesn't have reason to hold yet, and the live-mm step
+explicitly defers "defensive tool reconciliation" and similar hardening). Real-world impact
+measured during the acceptance run: 12 resends out of ~20k commands (~0.06%) — the virtual
+printer injects occasional simulated checksum errors — well inside the 1% acceptance tolerance,
+but worth fixing before FR-6 (mm→g conversion) makes the error carry into grams and, eventually,
+a Filament DB commit.
+
+**5. Acceptance measurement: the odometer is EXACT on the file; both offsets are explained.**
+An earlier draft of this entry read the −0.91 mm live delta as FR-5's "firmware can extrude
+without the host seeing it" gap, and concluded the resend bug (point 4) could not be involved
+because it would inflate rather than deflate. **Both halves of that were wrong**, and the truth is
+better. Corrected after an independent offline check.
+
+Three numbers, not two:
+
+| Source | Tool-0 total | vs file truth |
+|---|---|---|
+| **The file itself** — odometer run offline over the G-code, no OctoPrint | **2667.31 mm** | — |
+| Independent crude regex sum of every `E` on `G0`–`G3` | **2667.31 mm** | **exact agreement** |
+| Live measurement via `gcode.sent` during the print | 2668.10 mm | **+0.79 mm** |
+| PrusaSlicer's declared `filament used [mm]` | 2669.01 mm | +1.70 mm |
+
+Two *separate* offsets, each understood:
+
+- **Live vs file (+0.79 mm) is the resend double-count**, point 4 — measured, not theorised.
+  Twelve resends occurred in that run, and the live path counts a resent command twice while the
+  offline path (reading the file) cannot. Direction and magnitude both fit; not every resend need
+  be an extruding move, so this is "consistent with" rather than arithmetically exact.
+- **File vs slicer (+1.70 mm, 0.064%) is PrusaSlicer's own accounting**, not an odometer defect.
+  Two independent implementations agree to the hundredth of a millimetre on what the file
+  contains, so the difference is in how the slicer computes its reported figure versus the literal
+  sum of the `E` values it emitted.
+
+**Neither offset is firmware-invisible extrusion.** That FR-5 gap is real, but it cannot appear
+here: the offline run has no firmware at all and still shows the slicer difference, and the
+virtual printer does no MMU-style unprompted extrusion.
+
+The useful conclusion: **the state machine reads the file exactly.** Confirmed by a second,
+deliberately naive implementation rather than by agreement with the slicer — which is the stronger
+check, since the slicer is not ground truth for "what E values were emitted".
+
+**Method worth reusing:** the pure odometer can be run offline over any G-code file and diffed
+against a throwaway regex sum. That is a far tighter correctness check than a live print, needs no
+container, and should be the first thing tried when a metering change is suspected. It is also how
+the two offsets above were separated — a live-only measurement conflates them.
+
 ## 2026-08-02 — Plugin skeleton: six calls the PRD left implicit
 
 Building the first installable code (`pyproject.toml`, `octoprint_filamentdb/`, permissions,

@@ -5,9 +5,30 @@
   only, never the container. See docs/prd.md "OctoPrint UI framework".
 
   Bound (custom_bindings) to static/js/filamentdb.js's FilamentDBViewModel.
-  The spool list itself is a later step; this placeholder only proves the
-  binding works end to end.
+  The spool list itself is a later step (FR-2); the placeholder line below
+  stands in for it until then.
+
+  The odometer block is this step's actual instrument (FR-5 UI): raw
+  millimetres per tool, live during a print. Only OctoPrint/Bootstrap
+  semantic classes -- no hardcoded colour (docs/prd.md "Looking native").
 #}
 <div class="filamentdb-sidebar">
     <p class="muted" data-bind="text: placeholderText"></p>
+
+    <div data-bind="visible: hasOdometerData">
+        <p class="muted" data-bind="visible: odometerPrinting">
+            printing -- live raw extrusion
+        </p>
+        <p class="muted" data-bind="visible: !odometerPrinting()">
+            stopped -- final raw extrusion this job
+        </p>
+        <table class="table table-condensed filamentdb-odometer">
+            <tbody data-bind="foreach: odometerRows">
+                <tr>
+                    <td data-bind="text: label"></td>
+                    <td class="text-right" data-bind="text: mmText"></td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
 </div>

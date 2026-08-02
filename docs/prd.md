@@ -1017,6 +1017,25 @@ in v1 scope:
 - Any changeover marker (FR-12) implies a firmware-side sequence occurred, so the marker itself is a
   hint that a gap exists at that point in the timeline.
 
+**Known defect — a resent command double-counts.** Verified in `serial_connector/serial_comm.py`:
+`_resendNextCommand` (~4566) calls `_enqueue_for_sending(cmd, linenumber=…, resend=True)`, putting
+the command straight on the send queue, and the send loop then fires
+`_process_command_phase("sent", …)` (~4872). No tag distinguishes it — the resend path passes no
+`tags`. So a command the printer *rejected* on checksum, and therefore never extruded, is counted
+twice.
+
+Measured impact: 12 resends in a ~20 000-command print, inflating the total by **+0.79 mm on
+2667 mm (0.03%)**. Negligible on a healthy link, but resends scale with link quality — a long USB
+run or EMI makes this worse, and FR-6 carries the error straight into grams and then into a
+Filament DB commit.
+
+**Candidate fix (step 3): `resends fire `sent` but skip `queuing`.`** The normal path runs
+`_process_command_phase("queuing", …)` (~4624) *before* enqueueing; the resend path bypasses it
+entirely. That asymmetry means `queuing` sees each command exactly once. The trade-off is
+semantic — `sent` means "actually went to the printer", which is what metering wants — so the
+alternative is to keep `sent` and suppress accumulation while a resend is active. Decide in step 3;
+do not silently switch phases.
+
 **Known interaction — another plugin can rewrite or suppress tool commands before the odometer sees
 them.** A handler on `octoprint.comm.protocol.gcode.queuing` may return a replacement command, or
 suppress one entirely with `None,` — and a suppressed command **never reaches `gcode.sent`**.
