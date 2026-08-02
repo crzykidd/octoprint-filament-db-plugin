@@ -24,6 +24,11 @@ the v1 spec and it contains hard constraints that are expensive to rediscover, i
 - `filament.density` is **nullable**; `filament.diameter` is not.
 - Target is **OctoPrint 2.0 only**. No 1.x compat shims.
 
+**Stay in scope.** The plugin reads seven fields off a Filament DB filament — `_id`, `density`,
+`diameter`, `type`, `vendor`/`name`, `color`, and the spool sub-fields (PRD C-3b). The document has
+~40. Do not audit, display, sync, or file upstream issues about fields the plugin does not use.
+v1 is: pick a spool per tool, meter the print, write one print-history record back. Nothing else.
+
 Current status: **pre-alpha, design only — no application code yet.**
 
 **Licence: AGPLv3. All code must be original.** Prior art (notably
@@ -52,7 +57,9 @@ table in the same commit as any structural change — PRD rule N-8.*
 | History UI, failure report, retry & discard actions | `static/js/filamentdb.js`, `api.py` | FR-9b |
 | Print lifecycle events, cancel double-fire | `job.py` | FR-7 |
 | Tool slots, MMU, extruder count | `plugin.py` (profile read) + `static/js/filamentdb.js` | FR-3 |
-| Sidebar / tab / picker UI | `static/js/filamentdb.js`, `templates/*.jinja2` | FR-2, FR-8 |
+| Spool search / picker filters / sort | `static/js/filamentdb.js`, `api.py` | FR-2 |
+| Pre-print confirmation dialog; Print button not gated | `static/js/filamentdb.js` (wraps `printerStateViewModel.print` **and** `loadAndPrint`) | FR-4, Q-9 |
+| Sidebar / tab UI | `static/js/filamentdb.js`, `templates/*.jinja2` | FR-2, FR-8 |
 | Settings key, new option | `settings_keys.py` **first**, then consumers | N-6 |
 | Plugin API endpoint | `api.py` | FR-2, C-6 (CSRF) |
 | Permissions | `plugin.py` (permissions hook) | FR-10 |

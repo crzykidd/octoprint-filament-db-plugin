@@ -37,8 +37,11 @@ Re-derived by more than one session already; internalize them before touching co
    `source: "job"`). **Never also call `/spools/:id/usage` for the same print** — double-debit.
 2. **Filament DB works in grams, gross weight model.** The plugin owns the mm→g conversion;
    there is no length-based endpoint (Spoolman has one; FDB does not).
-3. **`filament.density` is nullable**, `diameter` is not. The fallback chain is FR-6 — do not
-   silently default and do not skip the user-facing warning.
+3. **`filament.density` is nullable** (verified — creating one without it is accepted);
+   `diameter` always has the 1.75 schema default. **But Filament DB resolves `own ?? parent` for
+   density in BOTH projections — never walk the parent chain yourself.** The FR-6 fallback is
+   therefore only reachable via a *root* filament with `density: null`; don't silently default, and
+   don't skip the user-facing warning.
 4. **OctoPrint 2.0 only.** No 1.x compat shims. Blueprints are CSRF-protected by default;
    `admin_permission` is gone; access APIs are snake_case.
 
@@ -63,8 +66,11 @@ Re-derived by more than one session already; internalize them before touching co
 - One commit at the end; the prompt file bundles into it.
 - Check `git status --porcelain` before editing; if the user is mid-edit on a file the plan
   touches, list it and ask.
-- **Branch strategy is undecided** — see the open item in `standards.md`. Ask before assuming
-  a `dev` branch exists.
+- **Work on `dev`. `main` is protected** — PRs only, force-push and deletion blocked, and
+  `enforce_admins: true` so even the owner cannot push directly. Changes reach `main` via a
+  `dev → main` PR. Conventional-commit prefixes (`feat:`/`fix:`/`chore:`/`docs:`).
+- **Never put anything in `private_data/`** expecting it to be committed — the whole directory is
+  gitignored. Committed test data goes in `tests/fixtures/`.
 
 **Code shape (the N-rules in `docs/prd.md`)**
 - **500-line hard cap per module.** Crossing it means splitting in the same change.
@@ -89,15 +95,28 @@ Nothing is in flight. The design is settled and the repo scaffolding is in place
 
 **Not yet done — likely next steps, in dependency order:**
 
-1. **`git init` + create the GitHub repo.** The repo is not under version control yet, and the
-   handoff workflow needs it (`git status --porcelain`, `git mv` into `prompts/done/`).
-2. **Resolve the six open questions (Q-1…Q-6 in `docs/prd.md`).** Most resolve by standing up
-   an OctoPrint 2.0 RC container against the existing Filament DB dev instance. Good first
-   handoff prompt (`model: opus` — it's research).
-3. **Decide the branch strategy** — adopt `code-checkin-and-pr @ 1.2.0` or define a minimal
-   rule locally. Blocks the first release, not the first commit.
-4. **Build the dev environment** (`docker-compose.dev.yml` + seeded `config.yaml` with the
-   virtual printer at `numExtruders: 5`). Blocked on Q-2 and Q-3.
+**Testing is staged — one new variable per phase. We are on phase 1.**
+**1.** clean OctoPrint 2.0, **no third-party plugins**, **single-extruder** virtual printer — prove
+the core loop end to end. **2.** real single-tool hardware. **3.** MMU (`mmu5` profile, then the real
+Core One + MMU). **4.** plugin coexistence (`Octoprint-PrusaMMU`). Most documented risk is phase 3+;
+don't let it complicate phase 1. Do not install other plugins in the dev instance yet.
+
+1. **Bring up the dev environment and confirm it works.**
+   `docker compose -f docker-compose.dev.yml up -d --build` → http://localhost:5000. The compose
+   and `Dockerfile.dev` are written but **have never been run** — verify the 2.0 RC upgrade
+   actually takes (the Dockerfile asserts it), then walk the wizard and enable the virtual
+   printer. This also answers **Q-3**.
+2. ~~Resolve the open questions.~~ **Done — Q-1…Q-8 are all answered** (2026-08-01), see the Open
+   questions table in `docs/prd.md`. Two changed requirements: `M600` is **not** in OctoPrint's
+   default `pausingCommands`, so a filament change does not pause the print at all; and `spoolId`
+   is optional on `POST /api/print-history`, which is exactly why it must always be sent.
+3. **Formally adopt `code-checkin-and-pr @ 1.2.0`** once CI exists. The branch rule is already
+   implemented (`dev` + protected `main`); the CI checks are what's missing.
+4. **Seed a null-density ROOT filament in the dev Filament DB** before trusting FR-6. The instance
+   is now 45 filaments / 36 spools (33 variants — good parent/variant coverage), but nothing
+   exercises the density fallback: a null-density *variant* inherits from its parent, so only a
+   root filament with `density: null` reaches that branch. Dev FDB is
+   `http://crzydev.home.arpa:3000`, writable, unauthenticated; clean up `zzz-*` records you create.
 5. **Then implement bottom-up**, in this order — each layer is pure and testable before the
    next depends on it: `metering/odometer.py` → `metering/convert.py` →
    `metering/gcode_meta.py` → `client/filamentdb.py` → `journal.py` → `retry.py` → `job.py` →
@@ -115,6 +134,11 @@ Nothing is in flight. The design is settled and the repo scaffolding is in place
   3. `hyiger/filament-db#1039` — post the design to the thread; it answers the OP's request.
   4. `hyiger/PrusaSlicer` (Filament Edition fork) — inject the OpenPrintTag UUID / FDB id into
      the G-code config block, which would make FR-13 auto-matching exact instead of fuzzy.
+- **`Octoprint-PrusaMMU` runs on the test rig** (Core One + MMU) — see PRD §Known plugin
+  interactions. It **remaps** `T<n>` at the `gcode.queuing` phase, so the odometer sees the
+  physically-correct tool (benign), and it publishes `plugin_prusammu_mmu_changed` explicitly for
+  other plugins — a better MMU signal than parsing `echo:MMU2:`. Coexistence is **deferred**; both
+  it and this plugin want to own "which spool is in slot N".
 - **Real MMU3 runout capture is committed** at `tests/fixtures/serial/mmu3-filament-change-runout.md`
   — use it, don't invent serial fixtures. It validates the odometer against firmware `M114`
   (exact match), and it **disproved** the earlier assumption that a filament change produces a

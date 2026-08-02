@@ -23,9 +23,13 @@ htmlcov/
 *.sqlite3
 *.db
 
+# Local-only working data: dev container volumes, scratch G-code, keys, notes.
+# See private_data/README.md (local) for what belongs here.
+private_data/
+
 # Dev environment
 docker-compose.override.yml
-octoprint-data/
+.env
 
 # Editors / OS
 .idea/
