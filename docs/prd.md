@@ -440,6 +440,117 @@ a traceback routes to the right file without a search.
 
 ---
 
+## User interface
+
+Designed before the metering layer, deliberately: **without a UI the odometer is a black box.** Unit
+tests prove the state machine against fixtures, but they cannot show whether the hook is wired
+correctly, whether non-print commands are being filtered, or whether pause/resume survives. A live
+readout is the instrument for all of that.
+
+The useful consequence: **the first instrument should display raw millimetres**, because millimetres
+have *zero* dependencies. Grams need an assigned spool, a Filament DB client, a density and the
+conversion; millimetres need only hook → accumulate → display. So a live mm counter is buildable
+before any of the data layer exists, and it can be checked against the slicer's
+`filament used [mm]` at print end — which is already FR-5's acceptance bar.
+
+### Reference: the Spoolman plugin's sidebar
+
+`octoprint-spoolman`'s sidebar is the proven layout and the starting point. Per tool it shows a
+colour swatch, `Tool #0:`, `[PLA] PLA Pistachio Green (Prusament)`, `615.6g / 1000g`, and a greyed
+`#181` (its spool id), with `✕` (clear) and `…` (more) buttons per row, and `Refresh` /
+`Open Spoolman` at the bottom. Five MMU slots fit without scrolling.
+
+A screenshot is kept locally at `private_data/screenshots/` (gitignored — not committed).
+
+Two deliberate departures:
+
+1. **`Tool #0`** → we display `Tool 1` by default (`toolDisplayOffset`, see FR-3). OctoPrint's own
+   0-based label is the thing users dislike, and it disagrees with both the MMU hardware and
+   Filament DB's `Slot 1…5`.
+2. **The weight figure means something different.** See below — this is not a cosmetic difference.
+
+### Weight display: Filament DB is gross, Spoolman is net
+
+Spoolman's `615.6g / 1000g` is *net remaining / nominal net* — it stores net directly. **Filament DB
+stores gross on the spool** (filament + reel), with the tare and nominal net on the **filament**, so
+the same display has to be computed:
+
+```
+net_remaining = spool.totalWeight  −  filament.spoolWeight      (gross − tare)
+nominal_net   = filament.netFilamentWeight
+              →  "624 g / 1000 g"
+```
+
+Both `spoolWeight` and `netFilamentWeight` live on the filament (shared across its spools), are
+nullable, and are **inheritance-resolved in both projections** (C-4) — so the list projection already
+carries everything the picker needs, with no extra fetch.
+
+Verified against the live library (36 spools): all three fields are populated, tares vary genuinely
+per filament (154 / 190 / 200 / 245 g), and every spool is fully computable. So the good path is the
+common one — but the degraded paths still need defining:
+
+| Missing | Display | Why |
+|---|---|---|
+| tare (`spoolWeight`) | `1042 g gross · tare not set` | **Never show gross as if it were net** — it overstates remaining filament by the weight of the reel, ~200 g. Label it explicitly. |
+| nominal (`netFilamentWeight`) | `624 g` — no denominator, no bar | A ratio needs both halves. |
+| gross (`totalWeight`) | `not weighed` | The spool exists but has never been put on a scale. |
+
+Two further rules:
+
+- **Net may legitimately exceed nominal.** Manufacturers overfill; a "1 kg" reel can hold 1050 g.
+  Clamp the progress bar at 100% but **show the true number** — never clamp the figure itself.
+- **Show gross on hover or in the detail view.** When a user physically weighs a spool they read
+  *gross*, so having it available is what makes reconciliation possible.
+
+**This affects display and the sufficiency check only — never the commit.** The usage write sends
+grams *consumed*, and Filament DB decrements gross itself (C-1). A missing tare degrades the UI and
+FR-4's sufficiency check, but the core meter-and-commit loop is unaffected. That separation is worth
+preserving: incomplete inventory metadata must never block recording what was actually used.
+
+### Sidebar
+
+Always visible; the at-a-glance state. Per tool:
+
+```
+┌─ Filament DB ──────────────────────── ● ┐
+│ ▉ Tool 1                      [✕] [⋯]   │
+│   [PLA] PLA Galaxy Black (Prusament)    │
+│   842.0 g / 1000 g   ▓▓▓▓▓▓▓▓░░  84%    │
+│   #177                                  │
+│   ⌇ dried 2026-07-15                    │
+│                                         │
+│ ── printing ─────────────────────────── │
+│ ▉ #177   ▲ 12.40 g  ·  4 062 mm         │
+│                                         │
+│ [⟳ Refresh]  [🗄 Open Filament DB]      │
+└─────────────────────────────────────────┘
+```
+
+Field rules, following `octoprint-spoolman`'s precedent of making optional identifiers settings
+toggles (it ships `showLotNumberInSidebar` / `showSpoolIdInSidebar`):
+
+| Field | Default | Notes |
+|---|---|---|
+| `label` (`#177`) | **always shown** | The direct analogue of Spoolman's `#181`, and what is physically on the spool. Primary identifier. |
+| `instanceId` (`970fdbcd56`) | **toggle, off** | 10 hex chars, not human-memorable. Earns its place when an NFC/QR scan misbehaves or when cross-referencing. Rendered de-emphasised beside the label. |
+| `notes` | **shown only if non-empty** | Free text on the spool subdocument. One truncated line, full text on hover. Most spools have none, so it costs nothing in the common case. |
+| `lotNumber` | toggle, off | Same treatment as `instanceId`. |
+
+During a print each tool additionally shows **live metered grams *and* raw millimetres**. The
+millimetre figure is the debugging instrument — it is what gets compared against the slicer's
+`filament used [mm]`, and it keeps working when no spool is assigned or no density is known.
+
+### Debug panel *(setting, off by default)*
+
+A collapsible section exposing the odometer's internal state: current tool, absolute/relative E
+mode, last E value, per-tool raw millimetres, count of `G92` resets seen, and any unsupported
+commands encountered (`M200`, `G10`/`G11`, `M221`).
+
+This exists because **a total that is silently wrong looks exactly like a total that is right.** The
+state machine is the highest-risk component in the plugin (FR-5); shipping it without a readout of
+its own state means debugging it from logs correlated against the terminal tab. Off by default, so
+it costs ordinary users nothing.
+
 ## Functional requirements
 
 ### P0 — must ship in v1
@@ -515,6 +626,10 @@ silently averaged away.
 - The list projection is sufficient for the picker — but **not** for conversion, since it omits
   `diameter` (C-4). The swatch uses the record's **own** `color`, which correctly does not inherit
   from the parent: a variant *is* a colour.
+- **Remaining weight is computed, not read.** `net = spool.totalWeight − filament.spoolWeight`,
+  against a `filament.netFilamentWeight` denominator. Both filament-level fields are
+  inheritance-resolved in the list projection, so no extra fetch is needed — see
+  §User interface → Weight display for the degraded paths when any of the three is null.
 - **Retired spools are hidden by default**, with a toggle to show them (mirrors the Spoolman
   plugin's archived-spool behaviour).
 - Selection is per tool index. Assignment is stored in settings as:

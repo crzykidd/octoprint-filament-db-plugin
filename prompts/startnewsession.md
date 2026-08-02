@@ -117,10 +117,16 @@ don't let it complicate phase 1. Do not install other plugins in the dev instanc
    exercises the density fallback: a null-density *variant* inherits from its parent, so only a
    root filament with `density: null` reaches that branch. Dev FDB is
    `http://crzydev.home.arpa:3000`, writable, unauthenticated; clean up `zzz-*` records you create.
-5. **Then implement bottom-up**, in this order — each layer is pure and testable before the
-   next depends on it: `metering/odometer.py` → `metering/convert.py` →
-   `metering/gcode_meta.py` → `client/filamentdb.py` → `journal.py` → `retry.py` → `job.py` →
-   `api.py` → UI (sidebar + picker, then the FR-9b history/failure report).
+5. **Then implement UI-first, not bottom-up.** Deliberate change — without a UI the odometer is a
+   black box that unit tests cannot fully validate (see `docs/decisions.md`, 2026-08-02). Order:
+   1. **plugin skeleton** — loads clean on OctoPrint 2.0, settings, permissions, sidebar shell
+   2. **live raw-millimetre readout** — the debug instrument. **Zero dependencies:** no Filament DB,
+      no spool selection, no density. Just hook → accumulate → display.
+   3. `metering/odometer.py` — now directly observable, and checkable against the slicer's
+      `filament used [mm]` (the FR-5 acceptance bar)
+   4. `metering/convert.py` → `metering/gcode_meta.py` → `client/filamentdb.py` → spool picker
+   5. `journal.py` → `retry.py` → `job.py` → commit path
+   6. pre-print confirmation dialog → FR-9b history/failure report
 
 ## Current state (update as it moves)
 

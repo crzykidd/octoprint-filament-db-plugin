@@ -33,6 +33,44 @@ defensively against OctoPrint's own state, and cross-check the per-tool split at
 against the slicer's per-extruder `filament used [mm]` array — if the total agrees but the split
 does not, warn instead of writing a confidently wrong attribution.
 
+## 2026-08-02 — UI designed before metering; remaining weight is computed, not stored
+
+**Sequencing changed on the user's argument, and it was the better call.** The plan had been to build
+`metering/odometer.py` first as the pure, highest-risk component. But without a UI the odometer is a
+black box: unit tests prove the state machine against fixtures, yet cannot show whether the hook is
+wired right, whether non-print commands are filtered, or whether pause/resume survives. Those are
+only observable live.
+
+The sharpening: **the first instrument should display raw millimetres**, because millimetres have
+zero dependencies. Grams need an assigned spool, the Filament DB client, a density and the
+conversion. Millimetres need only hook → accumulate → display, so the instrument is buildable before
+any data layer exists — and it is directly checkable against the slicer's `filament used [mm]`,
+which is already FR-5's acceptance bar.
+
+**Weight display is a real model difference, not a label difference.** Spoolman's `615.6g / 1000g` is
+net remaining / nominal net, stored directly. Filament DB stores **gross** on the spool with tare and
+nominal net on the **filament**, so the equivalent must be computed:
+`net = spool.totalWeight − filament.spoolWeight`, over `filament.netFilamentWeight`.
+
+Verified against the live library: all 36 spools have all three fields, with genuinely varying
+per-filament tares (154 / 190 / 200 / 245 g), so the good path is the common one. Degraded paths
+defined anyway, and the important rule is **never show gross as if it were net** — that overstates
+remaining filament by the weight of the reel, roughly 200 g. Label it `gross · tare not set` instead.
+
+Also: net may legitimately exceed nominal on overfilled reels, so clamp the progress *bar* at 100%
+but never the *figure*; and show gross on hover, because a user weighing a spool physically reads
+gross and that is what makes reconciliation possible.
+
+**Crucially this affects display and FR-4's sufficiency check only — never the commit.** The usage
+write sends grams consumed and Filament DB decrements gross itself (C-1). Incomplete inventory
+metadata must never block recording what was actually used.
+
+On identifiers in the sidebar: `label` (`#177`) is always shown as the analogue of Spoolman's `#181`
+and what is physically on the spool; `instanceId` and `lotNumber` are settings toggles defaulting
+off, following `octoprint-spoolman`'s own `showSpoolIdInSidebar` precedent; `notes` appears only when
+non-empty. A debug panel exposing raw odometer state ships behind a setting, because a total that is
+silently wrong looks exactly like one that is right.
+
 ## 2026-08-02 — Tool numbering: 0-based internally, 1-based on screen
 
 A real three-way mismatch, verified rather than assumed:
