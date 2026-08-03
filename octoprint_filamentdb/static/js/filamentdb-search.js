@@ -1,0 +1,119 @@
+// Copyright (C) 2026 crzykidd
+// SPDX-License-Identifier: AGPL-3.0-or-later
+//
+// OWNS: the picker's six-tier spool search ranking (FR-2) -- and, since
+//     search must run client-side over the cache with no request per
+//     keystroke, this is the **sole implementation**: there is no Python
+//     port. (An earlier Python reference module,
+//     octoprint_filamentdb/search.py, carried pytest coverage for the same
+//     rules but had no runtime role and was deleted -- see
+//     docs/decisions.md.) Coverage lives in
+//     tests/js/filamentdb_search_test.js, run under Node via
+//     tests/test_search_ranking_js.py so `pytest` still runs everything in
+//     one command.
+//
+//     Tier order: exact label -> exact instanceId -> exact _id ->
+//     label prefix -> instanceId prefix -> fuzzy. The instanceId-prefix
+//     tier (2026-08-02 picker UI fixes, fix 3) exists because nobody types
+//     all ten hex characters of an instanceId -- without it the hex
+//     identifier was effectively unsearchable (only a full exact match
+//     hit, and fuzzyHit() never looked at it either). It ranks above
+//     fuzzy, not merged into it, because a hex prefix is a deliberate
+//     identifier search and should outrank an incidental substring hit in
+//     a vendor name.
+// DOES NOT OWN: fetching or caching the spool list (the FilamentDBViewModel
+//     in filamentdb.js), or rendering results (the picker modal template).
+//
+// Exposes a single global, `FilamentDBSearch`, with one function:
+// `FilamentDBSearch.rank(rows, query)` -> ranked array of
+// `{ row, tier }`, most relevant first. `rows` items need only the fields
+// referenced below (label, instanceId, id, vendor, name, type, colorName,
+// locationName) -- extra fields are ignored.
+
+(function (global) {
+    "use strict";
+
+    var TIER_EXACT_LABEL = "exact_label";
+    var TIER_EXACT_INSTANCE_ID = "exact_instance_id";
+    var TIER_EXACT_ID = "exact_id";
+    var TIER_LABEL_PREFIX = "label_prefix";
+    var TIER_INSTANCE_ID_PREFIX = "instance_id_prefix";
+    var TIER_FUZZY = "fuzzy";
+
+    var TIER_ORDER = [
+        TIER_EXACT_LABEL,
+        TIER_EXACT_INSTANCE_ID,
+        TIER_EXACT_ID,
+        TIER_LABEL_PREFIX,
+        TIER_INSTANCE_ID_PREFIX,
+        TIER_FUZZY,
+    ];
+
+    function lower(value) {
+        return (value || "").toString().toLowerCase();
+    }
+
+    function fuzzyHit(query, row) {
+        var haystacks = [row.vendor, row.name, row.type, row.colorName, row.locationName];
+        for (var i = 0; i < haystacks.length; i++) {
+            var h = lower(haystacks[i]);
+            if (h && h.indexOf(query) !== -1) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    function rank(rows, query) {
+        query = lower(query).trim();
+        if (!query) {
+            return [];
+        }
+
+        var tiers = {};
+        TIER_ORDER.forEach(function (tier) {
+            tiers[tier] = [];
+        });
+
+        (rows || []).forEach(function (row) {
+            var label = lower(row.label);
+            var instanceId = lower(row.instanceId);
+            var id = lower(row.id);
+
+            if (label === query) {
+                tiers[TIER_EXACT_LABEL].push(row);
+            } else if (instanceId && instanceId === query) {
+                tiers[TIER_EXACT_INSTANCE_ID].push(row);
+            } else if (id && id === query) {
+                tiers[TIER_EXACT_ID].push(row);
+            } else if (label && label.indexOf(query) === 0) {
+                tiers[TIER_LABEL_PREFIX].push(row);
+            } else if (instanceId && instanceId.indexOf(query) === 0) {
+                // A hex prefix is a deliberate identifier search (e.g.
+                // "970fdb" for instanceId "970fdbcd56") -- outrank an
+                // incidental fuzzy substring hit elsewhere on the row.
+                tiers[TIER_INSTANCE_ID_PREFIX].push(row);
+            } else if (fuzzyHit(query, row)) {
+                tiers[TIER_FUZZY].push(row);
+            }
+        });
+
+        var results = [];
+        TIER_ORDER.forEach(function (tier) {
+            tiers[tier].forEach(function (row) {
+                results.push({ row: row, tier: tier });
+            });
+        });
+        return results;
+    }
+
+    global.FilamentDBSearch = {
+        TIER_EXACT_LABEL: TIER_EXACT_LABEL,
+        TIER_EXACT_INSTANCE_ID: TIER_EXACT_INSTANCE_ID,
+        TIER_EXACT_ID: TIER_EXACT_ID,
+        TIER_LABEL_PREFIX: TIER_LABEL_PREFIX,
+        TIER_INSTANCE_ID_PREFIX: TIER_INSTANCE_ID_PREFIX,
+        TIER_FUZZY: TIER_FUZZY,
+        rank: rank,
+    };
+})(window);

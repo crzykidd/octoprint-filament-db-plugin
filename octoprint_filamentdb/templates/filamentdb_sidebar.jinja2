@@ -1,0 +1,199 @@
+{# Copyright (C) 2026 crzykidd -- SPDX-License-Identifier: AGPL-3.0-or-later #}
+{#
+  Filament DB sidebar content. OctoPrint supplies the accordion-group
+  wrapper (id="sidebar_plugin_filamentdb") -- this template is content
+  only, never the container. See docs/prd.md "OctoPrint UI framework".
+
+  Bound (custom_bindings) to static/js/filamentdb.js's FilamentDBViewModel
+  (picker behaviour split into static/js/filamentdb-picker.js, same
+  viewmodel instance). Per-tool rows are fixed at four lines (PRD
+  §Sidebar): swatch/label/clear/menu, "[TYPE] Name (Vendor)", the computed
+  weight + bar, and "#label · instanceId". Everything else lives in a
+  hover tooltip. Only OctoPrint/Bootstrap semantic classes -- the one
+  literal colour is the filament swatch (data, not styling).
+#}
+<div class="filamentdb-sidebar">
+
+    <div class="filamentdb-error alert alert-error" data-bind="visible: libraryError">
+        <span data-bind="text: libraryError"></span>
+    </div>
+
+    <!-- ko foreach: toolRows -->
+    <div class="filamentdb-row">
+        <div class="filamentdb-line1">
+            <span class="filamentdb-swatch" data-bind="visible: assigned, style: {backgroundColor: color}"></span>
+            <span class="filamentdb-tool-label" data-bind="text: label"></span>
+            <span class="filamentdb-row-actions">
+                <a href="#" class="filamentdb-action" title="{{ _('Clear') }}"
+                   data-bind="visible: assigned, click: $parent.clearTool">
+                    <i class="fas fa-times"></i>
+                </a>
+                {# PRD §Sidebar's `⋯` menu -- a single item today
+                   (Open in Filament DB), but kept as a real dropdown
+                   rather than a flat icon because it is a documented
+                   growable seam (docs/decisions.md, FR-15 edit-spool
+                   lands here later as a second item). #}
+                <div class="btn-group filamentdb-action filamentdb-more" data-bind="visible: assigned">
+                    <a href="#" class="dropdown-toggle" data-toggle="dropdown" title="{{ _('More') }}">&#8943;</a>
+                    <ul class="dropdown-menu pull-right">
+                        <li><a href="#" data-bind="click: $parent.openSpoolInFilamentDb">{{ _('Open in Filament DB') }}</a></li>
+                    </ul>
+                </div>
+                <a href="#" class="filamentdb-action" title="{{ _('Assign a spool') }}"
+                   data-bind="click: function() { $parent.openPicker(toolIndex); }">
+                    <i class="fas" data-bind="css: assigned ? 'fa-exchange-alt' : 'fa-plus'"></i>
+                </a>
+            </span>
+        </div>
+
+        <!-- ko if: assigned -->
+        <div class="filamentdb-row-detail" data-bind="attr: {title: hoverTitle}">
+            <div class="filamentdb-line2 muted">
+                [<span data-bind="text: type"></span>]
+                <span data-bind="text: name"></span>
+                (<span data-bind="text: vendor"></span>)
+            </div>
+            <div class="filamentdb-line3">
+                <span data-bind="text: weightText"></span>
+                <span class="progress progress-striped filamentdb-bar" data-bind="visible: hasBar">
+                    <div class="bar" data-bind="attr: {style: percentStyle}"></div>
+                </span>
+                <span class="muted filamentdb-percent" data-bind="visible: hasBar, text: percentText"></span>
+            </div>
+            <div class="filamentdb-line4 muted">
+                #<span data-bind="text: spoolLabel"></span> ·
+                <span class="filamentdb-instance-id" data-bind="text: instanceId"></span>
+            </div>
+        </div>
+        <!-- /ko -->
+        <!-- ko ifnot: assigned -->
+        <div class="filamentdb-row-detail muted filamentdb-empty">{{ _('No spool assigned') }}</div>
+        <!-- /ko -->
+    </div>
+    <!-- /ko -->
+
+    <div class="filamentdb-bottom-bar">
+        <button class="btn btn-mini" data-bind="click: refreshLibrary">
+            <i class="fas fa-sync"></i> {{ _('Refresh') }}
+        </button>
+        <button class="btn btn-mini" data-bind="click: openFilamentDb, enable: filamentDbUrl()">
+            <i class="fas fa-database"></i> {{ _('Open Filament DB') }}
+        </button>
+    </div>
+
+    <div data-bind="visible: hasOdometerData">
+        <p class="muted" data-bind="visible: odometerPrinting">
+            {{ _('printing -- live raw extrusion') }}
+        </p>
+        <p class="muted" data-bind="visible: !odometerPrinting()">
+            {{ _('stopped -- final raw extrusion this job') }}
+        </p>
+        <table class="table table-condensed filamentdb-odometer">
+            <tbody data-bind="foreach: odometerRows">
+                <tr>
+                    <td data-bind="text: label"></td>
+                    <td class="text-right" data-bind="text: mmText"></td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+
+{# -- The spool picker modal. Content-wise this belongs to the sidebar's
+  viewmodel, not a separate template type -- see docs/decisions.md for why
+  it is embedded here rather than as a "generic" template. #}
+<div id="filamentdb_picker_modal" class="modal hide fade filamentdb-picker-modal" tabindex="-1">
+    <div class="modal-header">
+        <a href="#" class="close" data-bind="click: closePicker">&times;</a>
+        <h3>{{ _('Assign a spool') }} — <span data-bind="text: pickerTargetLabel"></span></h3>
+    </div>
+    <div class="modal-body">
+        <input type="text" class="input-block-level filamentdb-picker-search"
+               placeholder="{{ _('Search by label, tag id, vendor, name, type, colour, location...') }}"
+               data-bind="textInput: pickerQuery">
+
+        <div class="filamentdb-picker-filters">
+            <label class="checkbox inline">
+                <input type="checkbox" data-bind="checked: pickerHideRetired">
+                {{ _('Hide retired') }}
+            </label>
+
+            <select class="filamentdb-picker-filter" data-bind="value: pickerTypeFilter">
+                <option value="">{{ _('All materials') }}</option>
+                <!-- ko foreach: pickerMaterialTypes -->
+                <option data-bind="value: $data, text: $data"></option>
+                <!-- /ko -->
+            </select>
+
+            <select class="filamentdb-picker-filter" data-bind="value: pickerLocationFilter">
+                <option value="">{{ _('All locations') }}</option>
+                <!-- ko foreach: pickerLocations -->
+                <option data-bind="value: id, text: name"></option>
+                <!-- /ko -->
+            </select>
+        </div>
+
+        <table class="table table-condensed table-hover filamentdb-picker-results">
+            <thead>
+                <tr>
+                    <th class="filamentdb-col-swatch"></th>
+                    <th class="filamentdb-col-label">{{ _('Label') }}</th>
+                    <th class="filamentdb-col-filament">{{ _('Filament') }}</th>
+                    <th class="filamentdb-col-weight">{{ _('Remaining / Scale') }}</th>
+                    <!-- ko if: pickerSearching -->
+                    <th class="filamentdb-col-match">{{ _('Match') }}</th>
+                    <!-- /ko -->
+                    <th class="filamentdb-col-select"></th>
+                </tr>
+            </thead>
+            {# The click handler lives on the button only (not the <tr>
+               too) -- binding both fires selectSpool twice per click,
+               since the button's click event bubbles up into the row's
+               own handler. Found live: the second, bubbled call raced
+               the first call's confirmation dialog and silently ate it,
+               making the duplicate-assignment warning intermittently
+               never appear (docs/decisions.md). #}
+            <tbody data-bind="foreach: pickerResults">
+                <tr>
+                    <td><span class="filamentdb-swatch" data-bind="style: {backgroundColor: swatch}"></span></td>
+                    <td>
+                        #<span data-bind="text: row.label"></span>
+                        <span class="muted filamentdb-instance-id" data-bind="text: row.instanceId"></span>
+                        {# The duplicate-assignment badge lives here, not in
+                           the Match column -- it's about the spool itself
+                           (FR-2), not search relevance, so it must stay
+                           visible even when the Match column is hidden
+                           (fix 4) because the search box is empty. #}
+                        <span class="label label-warning" data-bind="visible: alreadyAssigned">
+                            {{ _('already on') }} <span data-bind="text: alreadyAssignedLabel"></span>
+                        </span>
+                    </td>
+                    {# Overflow guard only (fix 1) -- the modal is widened
+                       (see filamentdb.css) so a typical filament line fits
+                       on one line; the ellipsis + title tooltip below only
+                       fire for a pathological name that would otherwise
+                       wrap the row to several lines. #}
+                    <td class="filamentdb-picker-filament" data-bind="attr: {title: filamentLineTitle}">
+                        [<span data-bind="text: row.type"></span>]
+                        <span data-bind="text: row.name"></span>
+                        (<span data-bind="text: row.vendor"></span>)
+                    </td>
+                    <td data-bind="text: weightText"></td>
+                    <!-- ko if: $parent.pickerSearching -->
+                    <td>
+                        <span class="muted" data-bind="text: tierLabel"></span>
+                    </td>
+                    <!-- /ko -->
+                    <td><button class="btn btn-mini" data-bind="click: $parent.selectSpool">{{ _('Select') }}</button></td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p class="muted" data-bind="visible: pickerResults().length === 0 && libraryLoaded()">
+            {{ _('No spools match. Type to search, or clear a filter.') }}
+        </p>
+    </div>
+    <div class="modal-footer">
+        <a href="#" class="btn" data-bind="click: closePicker">{{ _('Cancel') }}</a>
+    </div>
+</div>

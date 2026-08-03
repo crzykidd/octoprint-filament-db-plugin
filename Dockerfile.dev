@@ -11,6 +11,16 @@ FROM octoprint/octoprint:latest
 
 ARG OCTOPRINT_VERSION=2.0.0rc4
 
+# Node is a test-only dependency: tests/test_search_ranking_js.py shells out to
+# `node` to run tests/js/filamentdb_search_test.js against
+# static/js/filamentdb-search.js -- the picker's search ranking has no Python
+# port (FR-2 requires it client-side), so this is the only way for `pytest` to
+# exercise the code that actually runs, in one command, in one place. Debian
+# bullseye's apt package (Node 12) is old but sufficient for this script -- no
+# npm dependencies, no package.json, nothing that would need a newer runtime.
+RUN apt-get update && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
 # GOTCHA: the base image sets PIP_USER=true with PYTHONUSERBASE=/octoprint/plugins,
 # and /octoprint is a VOLUME. A plain `pip install` would therefore land in the volume
 # and be shadowed the moment the bind mount is attached at runtime — the container
@@ -21,8 +31,14 @@ RUN PIP_USER=false pip install --no-cache-dir --upgrade "OctoPrint==${OCTOPRINT_
 # after an hour of debugging why a 2.0-only API is missing.
 RUN PIP_USER=false python -c "import octoprint; v=octoprint.__version__; print('OctoPrint', v); assert v.startswith('2.'), f'expected 2.x, got {v}'"
 
-# Once the plugin has packaging (pyproject.toml), install it editable so a container
-# restart picks up Python changes without a rebuild:
-#   RUN PIP_USER=false pip install --no-cache-dir -e /plugin
-# Left commented until packaging exists — an editable install of a directory with no
-# pyproject.toml fails the build.
+# /plugin is empty at build time -- docker-compose.dev.yml only bind-mounts the real
+# source there at *runtime*, overlaying whatever is copied in below. Copy the repo in
+# now purely so `pip install -e` has a pyproject.toml to read; the editable install's
+# egg-link points at the path /plugin, not at this layer's copy, so once the bind mount
+# takes over at container start, imports resolve against the live source instead.
+COPY . /plugin
+
+# Install the plugin editable, so a container restart picks up Python changes without
+# a rebuild. The `dev` extra pulls in pytest for the test-suite verification step; it
+# is not needed at runtime.
+RUN PIP_USER=false pip install --no-cache-dir -e "/plugin[dev]"

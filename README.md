@@ -11,12 +11,14 @@ print-history record back to Filament DB with the job name and the grams consume
 
 > ## ⚠️ Unreleased — early development
 >
-> **This project is in early development and has not been released.** There is currently **no
-> installable plugin** — the repository contains design documentation only. Nothing here is ready
-> to point at a Filament DB instance you care about.
+> **This project is in early development and has not been released.** The plugin now installs on
+> OctoPrint 2.0, meters extrusion live, and assigns Filament DB spools to tools — but it **does not
+> yet write anything back to Filament DB**, which is its entire purpose. Do not point it at a
+> Filament DB instance you care about.
 >
-> There is no version, no release, and no entry in the OctoPrint Plugin Repository yet. Please
-> don't file usage issues; design feedback is very welcome.
+> There is no release and no entry in the OctoPrint Plugin Repository yet. See
+> [`CHANGELOG.md`](CHANGELOG.md) for what has landed and what is still missing. Please don't file
+> usage issues; design feedback is very welcome.
 
 > ## ⚠️ Requires OctoPrint 2.0 — will not work on 1.x
 >
@@ -224,8 +226,14 @@ the plugin is installed editable.
 
 ## Status
 
-Design complete, implementation not started. See the PRD for the v1 scope and the open questions
-still to be resolved against a live OctoPrint 2.0 instance.
+**Pre-alpha, phase 1.** Design is complete and all open questions are resolved. Three
+implementation steps have landed: the plugin skeleton, live extrusion metering, and the Filament DB
+client with the spool picker.
+
+Still to build: mm→gram conversion, slicer metadata parsing, pre-print checks, the durable write
+journal, and the print-history commit that closes the loop.
+
+[`CHANGELOG.md`](CHANGELOG.md) tracks what has landed and its known limitations.
 
 ## Prior art
 

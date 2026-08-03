@@ -29,7 +29,9 @@ the v1 spec and it contains hard constraints that are expensive to rediscover, i
 ~40. Do not audit, display, sync, or file upstream issues about fields the plugin does not use.
 v1 is: pick a spool per tool, meter the print, write one print-history record back. Nothing else.
 
-Current status: **pre-alpha, design only — no application code yet.**
+Current status: **pre-alpha, phase 1.** Implemented: plugin skeleton, live raw-millimetre odometer
+readout, Filament DB client + spool picker + sidebar. Not yet: mm→gram conversion, slicer metadata,
+pre-print checks, the write journal, and the print-history commit.
 
 **Licence: AGPLv3. All code must be original.** Prior art (notably
 [`mdziekon/octoprint-spoolman`](https://github.com/mdziekon/octoprint-spoolman)) may be *read and
@@ -43,26 +45,33 @@ engineering choice, recorded in `docs/decisions.md`. New source files carry an A
 sufficient — e.g. a metering bug genuinely cannot require the API client, because `metering/`
 imports nothing internal.
 
-*Paths below are the planned structure (PRD §Architecture); they do not exist yet. Update this
-table in the same commit as any structural change — PRD rule N-8.*
+*Some paths below (`journal.py`, `retry.py`, `metering/convert.py`, `metering/gcode_meta.py`) are
+still planned structure (PRD §Architecture) and don't exist yet. Update this table in the same
+commit as any structural change — PRD rule N-8.*
 
 | Task | Read | Spec |
 |---|---|---|
 | Extrusion counted wrong; G-code state bug (`G92`, `M83`, `T<n>`, arcs) | `metering/odometer.py` + `tests/test_odometer.py` | FR-5 |
 | Grams wrong; density/diameter fallback | `metering/convert.py` + its test | FR-6, C-2, C-4 |
 | Slicer metadata not parsed; material/sufficiency check wrong | `metering/gcode_meta.py` + its test | FR-4 |
-| Filament DB request/response, auth, spool list | `client/filamentdb.py`, `client/models.py` | FR-1, FR-2, C-3, C-7 |
+| Filament DB request/response, auth | `client/filamentdb.py`, `client/models.py` + `tests/test_filamentdb_client.py` | FR-1, FR-2, C-3, C-7 |
+| Spool list stale / TTL / manual refresh | `client/cache.py` | FR-2 |
+| Remaining weight wrong; degraded weight paths (missing tare/nominal/gross, overfilled) | `weights.py` + `tests/test_weights.py` — the sole implementation, server-side only; `api.py`/`assignment.py` call it to annotate what they return, the frontend only renders `weightText`/`weightPercent` | C-2, §Weight display |
+| Assignment not saved, duplicate-tool warning, stored record shape | `assignment.py` | FR-2 |
 | Usage not committed / committed twice / wrong payload | `job.py`, `retry.py` | FR-7, FR-9, **C-1** |
 | Write failed / retry / journal state machine | `journal.py`, `retry.py` | FR-9, FR-9b |
 | History UI, failure report, retry & discard actions | `static/js/filamentdb.js`, `api.py` | FR-9b |
 | Print lifecycle events, cancel double-fire | `job.py` | FR-7 |
-| Tool slots, MMU, extruder count | `plugin.py` (profile read) + `static/js/filamentdb.js` | FR-3 |
-| Spool search / picker filters / sort | `static/js/filamentdb.js`, `api.py` | FR-2 |
+| Tool slots, MMU, extruder count | `static/js/filamentdb.js` (`toolCount`, reads `printerProfilesViewModel.currentProfileData()` — **not** `currentProfile()`, which is just the id string) | FR-3 |
+| Spool search ranking (six-tier match order) | `static/js/filamentdb-search.js` — the sole implementation (must run client-side, FR-2); tested via `tests/js/filamentdb_search_test.js` + `tests/test_search_ranking_js.py` (Node, run inside the normal `pytest` invocation) | FR-2 |
+| Picker modal: filters, sort, assign/clear, duplicate-warning UI | `static/js/filamentdb-picker.js`, `templates/filamentdb_sidebar.jinja2` | FR-2 |
 | Pre-print confirmation dialog; Print button not gated | `static/js/filamentdb.js` (wraps `printerStateViewModel.print` **and** `loadAndPrint`) | FR-4, Q-9 |
-| Sidebar / tab UI | `static/js/filamentdb.js`, `templates/*.jinja2` | FR-2, FR-8 |
+| Sidebar rows / live odometer readout | `static/js/filamentdb.js`, `templates/filamentdb_sidebar.jinja2` | FR-2, FR-8 |
 | Settings key, new option | `settings_keys.py` **first**, then consumers | N-6 |
-| Plugin API endpoint | `api.py` | FR-2, C-6 (CSRF) |
-| Permissions | `plugin.py` (permissions hook) | FR-10 |
+| Plugin API endpoint (list/assign/clear/test-connection/refresh) | `api.py` | FR-2, C-6 (CSRF) |
+| Permissions | `plugin.py` (permissions hook), `api.py` (per-endpoint enforcement) | FR-10 |
+| Doesn't look right under a theme; custom CSS | `static/css/`, `templates/*.jinja2` | PRD §OctoPrint UI framework — **never hardcode colours**; use Bootstrap 2 / OctoPrint classes |
+| Dashboard/3rd-party plugin can't see our data | `plugin.py` (`additional_state_data`, custom events) | PRD §OctoPrint UI framework — **that hook must never throw; one exception blocklists it until restart** |
 
 ## Code shape
 

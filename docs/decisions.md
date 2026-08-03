@@ -6,32 +6,577 @@ reader would otherwise have to re-derive.
 
 ---
 
-## 2026-08-01 — Tool count cannot come from the printer profile alone (FR-3 corrected)
+## 2026-08-02 — Picker UI fixes: a new `weights.py` field instead of client-side math, a table
+class-selector scheme that survives a conditional column, and where the duplicate-assignment
+badge had to move
 
-The first draft of FR-3 derived the number of tool slots from
-`printer_profile["extruder"]["count"]`, reasoning that OctoPrint already knows it. Validation
-showed that is unsafe:
+`prompts/2026-08-02-picker-ui-fixes.md`. Five independent fixes to the picker (widen the modal +
+overflow guard, a compact "net / gross" weight column, an `instanceId`-prefix search tier, hiding
+the Match column when not searching, and resolving `locationId` to a name). Five things worth
+recording that the prompt didn't spell out:
 
-- **The MMU tool count is manual user configuration.** OctoPrint knows an MMU3 has 5 tools only
-  because the user set Number of extruders = 5 and ticked Shared nozzle. Prusa's own docs instruct
-  this; nothing enforces or detects it.
-- **`Octoprint-PrusaMMU` does not set it either.** That plugin works at the G-code and
-  firmware-message level (`Tx` interception, `MMU2:` response parsing) and never touches the
-  profile. So a fully working MMU setup can report `extruder.count = 1` while the G-code drives
-  `T0`–`T4`.
+**1. The picker's "169.4 / 359.4 g" format is a new `WeightDisplay.picker_text` field in
+`weights.py`, not a client-side reformat of `weightText`.** `weightText`'s "169.4 g / 1000 g"
+already had the two numbers needed, and reformatting them in JS would have been the smaller diff.
+Rejected because it reintroduces exactly the "weight arithmetic/formatting duplicated in two
+languages" problem the prerequisite dedupe task just eliminated (docs/decisions.md, same date,
+"server-owns-weights") — `_trim()`/`_fixed1()`'s rounding rules would need a second, hand-synced
+implementation in JS to reformat correctly. `picker_text` is computed alongside `text` in
+`compute_weight()`, serialized as `weightPickerText` (`api.py`'s `_serialize_spool`), and consumed
+by the picker only — the sidebar keeps using `weightText` unchanged, per the prompt's explicit
+"picker-only" scope note. One consequence worth flagging: `picker_text`'s nominal-missing branch
+differs from `text`'s — the sidebar's degraded text for a missing nominal is a bare net figure
+("624.0 g", no gross, matching §Weight display's spec table verbatim), but the picker's scale
+figure never needed a nominal in the first place (only gross and tare), so `picker_text` renders
+"624.0 / 814 g" in that same case rather than degrading further. Both are intentional per-column
+behaviour, not an inconsistency — confirmed live via a `zzz-*` nominal-missing spool.
 
-Rendering one slot for a five-tool file would charge five tools' filament to one spool — data
-corruption, not a UI annoyance. Slot count is therefore the **union** of the profile count, the
-tool indices in OctoPrint's analysis metadata, and the slicer block's per-extruder array length,
-with a prominent warning when the G-code exceeds the profile.
+**2. The Match column's conditional presence forced a class-based column-width scheme, not
+`nth-child`.** Fix 1 (widen + ellipsis-clip the Filament column) needs `table-layout: fixed` with
+explicit widths on every other column so the Filament column alone absorbs remaining space. Fix 4
+makes the Match `<th>`/`<td>` pair conditionally rendered (`ko if: pickerSearching`). Since CSS
+column widths in a fixed-layout table come from the first row's cells, and `nth-child` position
+shifts when Match disappears, positional selectors would silently target the wrong column in one
+of the two states. Solved with explicit `filamentdb-col-*` classes on every `<th>` instead —
+stable regardless of how many columns are actually rendered.
 
-**Second finding from the same validation:** a plugin can suppress a command at
-`octoprint.comm.protocol.gcode.queuing` (return `None,`), and a suppressed command **never reaches
-`gcode.sent`**. `Octoprint-PrusaMMU` does exactly this to `Tx`. An odometer inferring the active
-tool solely from observed `Tx` can therefore mis-attribute. Mitigation: track the active tool
-defensively against OctoPrint's own state, and cross-check the per-tool split at commit time
-against the slicer's per-extruder `filament used [mm]` array — if the total agrees but the split
-does not, warn instead of writing a confidently wrong attribution.
+**3. The duplicate-assignment ("already on Tool N") badge moved out of the Match column into the
+Label column.** It used to share the Match `<td>` with the tier label. Hiding the whole Match
+column when not searching (fix 4) would have silently hidden the duplicate-assignment warning too
+while browsing without a query — a real regression of an existing FR-2 feature that has nothing to
+do with search relevance. Moved the badge next to the spool label/instanceId instead, where it's
+now visible in both states; verified live that `#47` still shows "already on Tool" with an empty
+search box.
+
+**4. A location-fetch failure degrades to an empty list, not a 502 for the whole picker GET.**
+`GET /api/locations` is additive display-only data (C-3b); the filament list is the endpoint's
+essential payload per the existing cache docstring's "leave a previously-cached value intact"
+philosophy for `list_filaments()`. Applied the same tolerance one level up: `on_api_get()` and
+`_handle_refresh()` catch a `FilamentDBError` from `get_locations()` separately from the filaments
+fetch, log a warning, and continue with `locations=[]` — `locationName` then resolves to `null`
+for every row via the existing "unknown locationId shows nothing" rule, rather than blanking the
+whole picker over a display-only endpoint being briefly unreachable.
+
+**5. `client/cache.py`'s `FilamentCache` grew a second cached entry (`get_locations()`) via a
+small shared `_get_cached(key, fetch_fn, ...)` helper, not a duplicate TTL implementation or a new
+`LocationCache` class.** The prompt says to cache locations "alongside the filament list", which
+reads as one cache instance's lifetime, not a second object api.py has to also own and pass around.
+Genericized the existing get()'s body into a keyed helper (`self._entries[key] = {value,
+fetched_monotonic}`) rather than copy-pasting the ~15-line TTL/lock dance a second time.
+
+**6. No location display was added to the sidebar or to any picker row's tooltip beyond the
+title="full filament line" overflow guard from fix 1.** The prompt's fix 5 says "resolve locationId
+→ name everywhere a location is shown — the filter dropdown and the row/tooltip." Audited every
+current location-related surface first: the sidebar has never displayed location at all (its hover
+tooltip only ever showed gross/tare), and the picker row itself has no location column — location
+only ever existed as the filter dropdown's value and as `fuzzyHit()`'s (previously unpopulated)
+`locationName` field. Read "the row/tooltip" as covering those two real surfaces (the filter
+dropdown, now names; `row.locationName`, now populated so fuzzy search actually matches location
+text) rather than as a mandate to add a wholly new location display that didn't exist before this
+fix. `row.locationName` is populated in `filamentdb.js`'s `loadLibrary()` regardless, so a future
+tooltip addition costs nothing extra.
+
+**7. Four `zzz-*` filaments (not one filament with four spools) for the degraded-path
+verification**, because tare (`spoolWeight`) and nominal (`netFilamentWeight`) are filament-level
+fields, not spool-level — Filament DB's inheritance model (C-4) makes a single filament unable to
+represent "tare missing" and "nominal missing" simultaneously across different spools. Created via
+direct `POST /api/filaments` + `POST /api/filaments/{id}/spools` calls (curl, no plugin create-flow
+exists), verified rendering live in the picker (`not weighed`, `1042 g gross · tare not set`,
+`624.0 / 814 g`, `1100.0 / 1290 g` for the overfilled case), then deleted via `DELETE
+/api/filaments/{id}` each (soft delete to trash, same as the prerequisite session's convention) —
+confirmed the live list count returned to 63.
+
+---
+
+## 2026-08-02 — Deduped weights/search: server-owns-weights vs. JS-owns-search, and how the
+weight annotation reaches every frontend read path
+
+`prompts/2026-08-02-dedupe-weights-search.md`. Removed the two hand-synced ports left over from
+the spool-picker step: `static/js/filamentdb-weights.js` (deleted; `weights.py` is now the sole
+implementation, called server-side) and `octoprint_filamentdb/search.py` +
+`tests/test_search_ranking.py` (deleted; `static/js/filamentdb-search.js` is now the sole
+implementation, since FR-2 requires search to run client-side with no round trip per keystroke).
+Verified byte-identical rendered output against the live #177 acceptance target and all four
+degraded-weight paths, in both the sidebar and the picker (the picker is a separate call site of
+the deleted JS and the likelier place for a silent regression — Playwright-driven, both call
+sites checked).
+
+**1. Weight annotation had to reach three different read paths, not just the two the prompt named
+(the list endpoint and the assign response) — solved by decorating inside `AssignmentStore`, not
+just `api.py`.** The prompt said "api.py decorates... the list/search endpoint as well as the
+assign response, which already does this." But the sidebar's per-tool rows read from
+`selectedSpools`, which is populated two ways: the initial `GET /api/plugin/filamentdb` *and* the
+websocket `assignment` push that `AssignmentStore._push()` fires directly — bypassing `api.py`
+entirely. Decorating only in `api.py` would have left the push (the path that actually updates the
+sidebar live after an assign) sending undecorated records. Fixed by moving the annotation into
+`AssignmentStore` itself: `_raw_all()` reads settings unchanged (used for the read-modify-write in
+`set()`/`clear()` and for `find_tool_for_spool()`, which never needed weight), while `all()`,
+`get()`, and `set()`'s return value all go through a new `_decorate()` that computes
+`weightText`/`weightPercent` (and `grossText`/`tareText` for the sidebar's gross/tare hover
+tooltip, which also used to call the deleted JS's `trim()`) fresh from the record's own cached
+`display` fields — no live fetch, so the "self-sufficient for offline rendering" property the
+class's docstring already claimed still holds, just computed server-side. The persisted settings
+record itself stays undecorated (annotation happens only on read), so there's nothing to migrate
+for assignments written before this change.
+
+**2. `weights.py` gained a small public API surface it didn't have before: `format_grams()`.** The
+sidebar's hover tooltip ("Gross 1042 g · Tare 190 g") formats bare gross/tare figures independently
+of the full `compute_weight()` text, and used to call the deleted JS port's `trim()` for that. Making
+this JS-arithmetic-free (per the prompt's "no weight arithmetic... at all" bar) meant exposing a
+thin public wrapper around the module's existing private `_trim()` rather than duplicating the
+rounding rule a third place or leaving the hover unformatted.
+
+**3. Node added to `Dockerfile.dev` via `apt-get install nodejs`, not a pinned newer version.**
+Debian bullseye's own package is Node 12.22 — old, but the test script
+(`tests/js/filamentdb_search_test.js`) uses no npm dependencies and only broadly-supported syntax,
+so pinning a newer runtime via nodesource or similar was judged unnecessary complexity for a
+test-only dependency. `tests/test_search_ranking_js.py` shells out to it and asserts exit code 0,
+**failing** (never skipping) if `node` is missing — confirmed by running `pytest -k search -v`
+and observing the test actually execute (11 sub-assertions inside the Node script, all passing),
+not skip.
+
+**4. The Playwright browser check ran from the host via a scratch `npx playwright` install, not
+the `claude-in-chrome` extension** (not connected in this session) **and not inside the dev
+container** (no Node runtime available for a browser at all, and Playwright's browsers are a
+separate several-hundred-MB download not worth adding to `Dockerfile.dev` for one verification
+step). Logged in through the real "Please log in" page (not a passive/local-network autologin —
+none is configured), drove the sidebar and picker for all five weight cases plus a search check,
+and confirmed the one console error present (`ErrorTrackingViewModel` / `octoprint_release_channel`
+in OctoPrint's own `packed_core.js`) is pre-existing and unrelated: it fires from core's error
+tracker reading a `softwareupdate` settings key that's absent because `softwareupdate` is
+deliberately disabled on this dev instance (`private_data/dev-credentials.md`), not from anything
+under `octoprint_filamentdb`.
+
+**5. The four degraded-weight `zzz-*` Filament DB records were created via direct `POST
+/api/filaments` calls (curl), not through the plugin UI** — there's no create-filament flow in this
+plugin (out of scope, v1 only assigns existing spools) — and deleted afterward via `DELETE
+/api/filaments/{id}`, which is a soft delete to Filament DB's own trash (confirmed by the trash
+listing already containing many earlier sessions' `zzz-*` records) rather than a hard purge. This
+matches the established convention on this dev instance; no plugin-side action needed beyond
+calling `DELETE`. The tool-0 assignment used for the live check (spool `#47`, pre-existing from
+before this session) was restored to its original state afterward rather than left cleared.
+
+---
+
+## 2026-08-02 — Filament DB client + spool picker: three real Knockout bugs only a live
+browser found, plus the scope calls behind them
+
+Step 3 of `prompts/startnewsession.md`'s build order: `client/filamentdb.py` + `client/models.py`
++ `client/cache.py` (the FDB REST client and TTL cache), `weights.py` (C-2's gross→net
+computation), `search.py` (the FR-2 five-tier ranking spec), `assignment.py` (the one choke point
+for `selectedSpools`), `api.py` (the plugin REST surface), and the picker/sidebar UI
+(`static/js/filamentdb*.js`, `templates/filamentdb_sidebar.jinja2`). Verified end to end against
+the running dev container and the live `crzydev.home.arpa:3000` Filament DB instance: unit tests,
+a clean restart, and extensive Playwright-driven browser checks (idle, spool assigned, duplicate
+assignment, all five degraded-weight paths).
+
+**1. Three genuine client-side bugs, all invisible from source review, all caught only by
+actually clicking through the UI in a real browser — reconfirms the standing "UI work needs a
+real browser check" lesson rather than merely restating it.**
+
+- **A `<tr data-bind="click: ...">` wrapping a `<button data-bind="click: ...">` with the *same*
+  handler double-fires it.** The button's click event bubbles to the row, so Knockout's two
+  independent click bindings both run for one physical click. For `selectSpool()` this was
+  actively dangerous, not just wasteful: the second (bubbled) call raced the first call's
+  `showConfirmationDialog()` for the duplicate-assignment warning and could silently eat it,
+  making the warning appear intermittently — sometimes present (screenshot proof), sometimes
+  gone with no assign happening at all and no error anywhere. Fixed by binding the click on the
+  button only. Lesson for future rows/tables in this codebase: never put the same KO click
+  handler on both a row and something clickable inside it.
+- **`printerProfilesViewModel.currentProfile()` is just the profile's id *string*** (e.g.
+  `"coreone"`), not the profile object — confirmed by reading OctoPrint's own
+  `printerprofiles.js`. The actual data, including `extruder.count`, lives on the separate
+  `currentProfileData` observable (a `ko.mapping`-wrapped object). Using `currentProfile()`
+  compiled fine, threw no console error, and simply always evaluated `toolCount` as 1 — a fresh
+  2-tool printer profile silently rendered one sidebar row. Caught only by actually raising the
+  extruder count in the running UI and watching the sidebar not update. Both names are
+  plausible; a source-only read would not have caught the mismatch.
+- **A bare `data-bind` expression referencing a property that doesn't exist on `$data` throws a
+  `ReferenceError`, not `undefined`.** The sidebar's swatch (`style: {backgroundColor: color}`)
+  is outside the `<!-- ko if: assigned -->` guard so the row shape is visible even when empty;
+  the unassigned-row object initially had no `color` key at all (not even `null`), and Knockout's
+  `with($data){ color }` evaluation fell through to global scope and threw, breaking the *entire*
+  view model's binding for both the sidebar and settings panel. Fixed by always seeding a default
+  `color: null` on every row regardless of assignment state. General rule worth keeping: every
+  key a bare (non-`if`-guarded) binding expression touches must exist on every possible shape of
+  that row object, even when the value is meaningless.
+
+**2. A fourth, milder bug from the same root cause as #1's class of issue: a `<form data-bind="with:
+settingsViewModel.settings...">` rebinds `$data` for everything inside it.** The Test Connection
+button was first placed inside that `with` block; `testConnection`/`testingConnection` are
+`FilamentDBViewModel`'s own members, not settings fields, so the bare reference resolved against
+the settings sub-object and threw "testConnection is not defined" — again breaking the whole
+settings panel binding. Fixed by moving the button block outside the `<form>`. Rule: anything
+that isn't itself a `plugins.filamentdb.*` setting does not belong inside that `with`.
+
+**3. `is_api_protected()` must be overridden explicitly (OctoPrint 1.11.2+/2.0).** Leaving the
+`SimpleApiPlugin` default logs a startup deprecation warning every boot ("no new warnings" would
+otherwise fail). Returned `True` — a logged-in user is required before OctoPrint even dispatches
+to `on_api_get`/`on_api_command`; the FR-10 permission checks inside those methods are the actual
+enforcement and remain unchanged.
+
+**4. `octoprint_filamentdb/__init__.py`'s top-level `from .plugin import ...` was silently
+poisoning every standalone import of `client/` or `metering/`**, exactly as the prompt predicted:
+importing any submodule of a package runs that package's `__init__.py` first, so
+`import octoprint_filamentdb.client.filamentdb` failed with `ModuleNotFoundError: octoprint` even
+though `client/filamentdb.py` itself imports nothing but `requests`. Fixed by deferring the
+`.plugin` import into `__plugin_load__()`, which OctoPrint only ever calls from inside a running
+process where `octoprint` is guaranteed importable. Verified by importing
+`octoprint_filamentdb.client.filamentdb`, `.client.models`, `.client.cache`, `.weights`, and
+`.search` directly from the host Python (no venv, no OctoPrint installed) before writing any
+tests — this is what let `tests/test_filamentdb_client.py` and `tests/test_weights.py` run without
+the container at all.
+
+**5. C-3b's "seven fields" is a floor, not a ceiling — `spoolWeight` and `netFilamentWeight` are
+also read, per C-2 and §Weight display, which are unambiguous and postdate C-3b's list.** Not a
+PRD contradiction requiring escalation: C-2's `net = spool.totalWeight − filament.spoolWeight`
+and §Weight display's `nominal = filament.netFilamentWeight` are explicit, repeated, and load-
+bearing for this exact task, so C-3b's enumeration is read as an earlier, incomplete pass rather
+than a scope boundary. `client/models.py` carries both fields; nothing else on either document is
+read.
+
+**6. Weight display formatting rule the PRD illustrates but never states precisely, resolved
+against the live, verified #177 acceptance figure rather than the prose mock.** Both the PRD's
+sidebar mock (`842.0 g / 1000 g`) and the live acceptance target (`169.4 g / 1000 g` for
+169.37 net) agree: the **net** figure is always rendered to exactly 1 decimal place, even when
+that's a trailing zero; the **nominal/gross-only** figure is trimmed (whole numbers show with no
+decimal). The PRD's degraded-path prose examples (`624 g`, `1042 g gross`) don't disambiguate
+this and are treated as illustrative shorthand, not a literal spec, since the acceptance target is
+the one live-verified oracle. Implemented identically in `weights.py` (pytest-covered) and its
+hand-kept JS port `static/js/filamentdb-weights.js`.
+
+**7. Two ports of pure logic exist deliberately: `weights.py`/`filamentdb-weights.js` and
+`search.py`/`filamentdb-search.js`.** Both algorithms must run client-side with no round trip
+(§Weight display renders from the cached assignment record; FR-2's search is explicitly
+"no request per keystroke"), so the JS side is the real runtime path — but pytest can't execute
+JS without adding a Node toolchain to the container, which was judged out of scope for this step.
+Each Python module therefore doubles as the pytest-covered *specification* of the algorithm's
+rules (rounding, degraded paths, five-tier ranking order), and the JS file is a hand-kept port
+verified by the live Playwright acceptance checks rather than by shared source. Both files'
+docstrings cross-reference each other and warn that a rule change must be made in both places.
+
+**8. `assignment.py` is a new module not in the PRD's original Architecture diagram, added because
+the prompt named it explicitly ("the assignment choke point") and FR-2/FR-11/FR-14 all need one
+place that owns `selectedSpools` reads and writes.** It sits alongside `job.py` in the layering —
+not pure (it touches OctoPrint's settings object and `plugin_manager`), but callable from any
+thread, which is what lets a future NFC read (FR-14, off a serial-hook thread) call `set()`
+directly without a synthetic HTTP round-trip through `api.py`.
+
+**9. The picker's location filter filters and displays by raw `locationId`, not a resolved name.**
+Fetching `/api/locations` to resolve names is a field-family C-3b never lists (only the spool's
+own `locationId` is in scope), so v1 shows the id string. Functionally correct (filters spools by
+which location they share) but not pretty; resolving names is a natural, additive follow-up, not
+a defect in this step.
+
+**10. Hover-tooltip content is intentionally minimal: gross + tare only, via a native `title`
+attribute, not a Bootstrap tooltip widget.** §Sidebar's hover-detail list (notes, lot number,
+location, dates, last-used) includes several fields C-3b doesn't have the plugin reading at all
+(notes, lot number, opened/purchase dates aren't part of the seven-plus-two fields this step
+fetches). Gross and tare are the two PRD explicitly calls "what makes reconciliation possible" and
+are already on hand from the assignment record, so those are what's shown; the rest is deferred
+rather than fetching additional fields not otherwise in scope.
+
+**11. Test Connection is gated on `FILAMENTDB_ADMIN`, not `FILAMENTDB_SELECT`.** It lives on the
+settings page and probes the *configured* URL/key, which FR-10 assigns to Admin ("change plugin
+settings"); `refresh` (bypassing the picker's cache) stays under `FILAMENTDB_SELECT` since it's a
+day-to-day picker action, not a settings action.
+
+**Method reused from the previous step, worth restating:** every one of bugs #1–#4 above was
+invisible from a clean `pytest` run and a clean server log — bugs #1 and #3 threw no error at all
+under some inputs, and #2/#4 threw errors that never reached the terminal (`__init__.py`'s bug
+only shows up importing outside the container; the KO scope bugs only show up as browser console
+errors). A real Playwright session driving actual clicks was the only check that found any of
+them.
+
+## 2026-08-02 — Live raw-mm odometer: G90/G91-vs-M82/M83 semantics, job.py's role, and a
+resend double-count bug for step 3
+
+Step 2 of `prompts/startnewsession.md`'s build order: `metering/odometer.py` (pure
+accumulator), `job.py` (new — print-lifecycle metering session), the `gcode.sent` hook and
+`on_event` wiring in `plugin.py`, and the live sidebar readout
+(`static/js/filamentdb.js`/`filamentdb_sidebar.jinja2`). Verified end to end against the
+running dev container: unit tests, a clean restart, a Playwright browser check (idle and
+live), and the acceptance print itself.
+
+**1. Extrusion-mode resolution algorithm — the PRD names the interaction but not the
+algorithm.** FR-5 says to track both `M82`/`M83` and `G90`/`G91` and "resolve per firmware
+convention, defaulting to Marlin behaviour," but doesn't spell out the precedence. Implemented
+stock Marlin's actual semantics: `G90`/`G91` set *all* axes together, including E, while
+`M82`/`M83` override *only* E independently — so a later `G90`/`G91` resets E mode back in
+step with position mode, discarding any standing `M82`/`M83` override. This rarely matters in
+practice (slicers issue `M83` once near the top and never reissue `G90`/`G91` mid-print), but
+it's the literal firmware behaviour rather than a simplification, and it's covered by
+`tests/test_odometer.py::test_g90_g91_govern_e_when_no_explicit_m82_m83_override`.
+
+**2. `job.py` created now, minimal, as the home for print-lifecycle *decisions* — not just
+promised by the Architecture diagram.** The prompt's own instructions describe the hook/event
+wiring as living in `plugin.py` but say decisions must stay out of it (N-5). Rather than invent
+a new module, `job.py` was created per the PRD's pre-existing Architecture table (which already
+named it "print lifecycle: start/pause/resume/terminal → commit") and given exactly this step's
+slice: `MeteringSession` owns when the odometer resets/accumulates/stops and the ~1/s push
+throttle. It does **not** yet own commit/journal/retry — those land with their own steps. This
+keeps `job.py`'s eventual full scope (per Architecture) growing additively rather than needing a
+later restructure.
+
+**3. Cancel's `PrintCancelled`-then-`PrintFailed` double-fire is handled by idempotency, not by
+special-casing cancel.** `MeteringSession.handle_event()` treats every terminal event
+identically: the first one stops accumulation and returns `True` (triggering a push); a second
+terminal event received while already stopped is a no-op returning `False`. This satisfies "do
+not double-handle" without needing to know cancel specifically produces two events — it's
+correct regardless of which terminal events actually fire, in what order, or how many.
+
+**4. Found, NOT fixed (deliberately out of scope): a resend re-fires `gcode.sent`, so the
+odometer double-counts it.** Confirmed in the running container's OctoPrint 2.0.0rc4 source,
+`serial_connector/serial_comm.py`: `_resendNextCommand` (~4566) calls `_enqueue_for_sending(cmd,
+linenumber=..., resend=True)`, which enqueues directly; the send loop then fires
+`_process_command_phase("sent", ...)` (~4872) same as any other command. No tag distinguishes
+it — the resend path passes no `tags`, so `tags=None` at the hook, identical to a first-time
+send. Notably, the **normal** path also fires `_process_command_phase("queuing", ...)` (~4624)
+*before* enqueueing, but the resend path skips `queuing` entirely — that asymmetry (present on
+`sent` but absent on `queuing`) is the shape of the eventual fix: filter in the `sent` handler
+using information only the `queuing` phase would have seen, or track line numbers already
+accounted for. **Not fixed here** — it's step-3 hardening (`metering/odometer.py` already
+correctly ignores commands it can't interpret; recognizing "this exact line was already
+counted" needs state this pure accumulator doesn't have reason to hold yet, and the live-mm step
+explicitly defers "defensive tool reconciliation" and similar hardening). Real-world impact
+measured during the acceptance run: 12 resends out of ~20k commands (~0.06%) — the virtual
+printer injects occasional simulated checksum errors — well inside the 1% acceptance tolerance,
+but worth fixing before FR-6 (mm→g conversion) makes the error carry into grams and, eventually,
+a Filament DB commit.
+
+**5. Acceptance measurement: the odometer is EXACT on the file; both offsets are explained.**
+An earlier draft of this entry read the −0.91 mm live delta as FR-5's "firmware can extrude
+without the host seeing it" gap, and concluded the resend bug (point 4) could not be involved
+because it would inflate rather than deflate. **Both halves of that were wrong**, and the truth is
+better. Corrected after an independent offline check.
+
+Three numbers, not two:
+
+| Source | Tool-0 total | vs file truth |
+|---|---|---|
+| **The file itself** — odometer run offline over the G-code, no OctoPrint | **2667.31 mm** | — |
+| Independent crude regex sum of every `E` on `G0`–`G3` | **2667.31 mm** | **exact agreement** |
+| Live measurement via `gcode.sent` during the print | 2668.10 mm | **+0.79 mm** |
+| PrusaSlicer's declared `filament used [mm]` | 2669.01 mm | +1.70 mm |
+
+Two *separate* offsets, each understood:
+
+- **Live vs file (+0.79 mm) is the resend double-count**, point 4 — measured, not theorised.
+  Twelve resends occurred in that run, and the live path counts a resent command twice while the
+  offline path (reading the file) cannot. Direction and magnitude both fit; not every resend need
+  be an extruding move, so this is "consistent with" rather than arithmetically exact.
+- **File vs slicer (+1.70 mm, 0.064%) is PrusaSlicer's own accounting**, not an odometer defect.
+  Two independent implementations agree to the hundredth of a millimetre on what the file
+  contains, so the difference is in how the slicer computes its reported figure versus the literal
+  sum of the `E` values it emitted.
+
+**Neither offset is firmware-invisible extrusion.** That FR-5 gap is real, but it cannot appear
+here: the offline run has no firmware at all and still shows the slicer difference, and the
+virtual printer does no MMU-style unprompted extrusion.
+
+The useful conclusion: **the state machine reads the file exactly.** Confirmed by a second,
+deliberately naive implementation rather than by agreement with the slicer — which is the stronger
+check, since the slicer is not ground truth for "what E values were emitted".
+
+**Method worth reusing:** the pure odometer can be run offline over any G-code file and diffed
+against a throwaway regex sum. That is a far tighter correctness check than a live print, needs no
+container, and should be the first thing tried when a metering change is suspected. It is also how
+the two offsets above were separated — a live-only measurement conflates them.
+
+## 2026-08-02 — Plugin skeleton: six calls the PRD left implicit
+
+Building the first installable code (`pyproject.toml`, `octoprint_filamentdb/`, permissions,
+templates, assets) surfaced six decisions the PRD didn't spell out. None contradict it; all are
+recorded here so a future session doesn't have to re-derive them.
+
+**1. `templates/` and `static/` both live under `octoprint_filamentdb/`, not at repo root.**
+The Architecture ASCII diagram draws `templates/` unindented (a repo-root sibling of
+`octoprint_filamentdb/`) while `static/` is nested inside it. Followed literally, that would need
+overriding `TemplatePlugin.get_template_folder()`, since OctoPrint's default resolves both
+`templates/` and `static/` relative to the plugin implementation module's own directory
+(confirmed by reading `octoprint/plugin/types.py` in the running 2.0.0rc4 container). Every real
+OctoPrint plugin — including the ones this project cites for UX reference — keeps both under the
+package. Read the diagram's flat `templates/` as an ASCII-art indentation slip rather than a
+deliberate layout, and put both under the package to avoid packaging complexity and an
+unnecessary override. Verified end-to-end: the container renders both panels correctly this way.
+
+**2. `requestTimeout`'s default (5 s) isn't specified anywhere in the PRD.** FR-1 asks for a
+"connection timeout" setting but never numbers it. Picked 5 seconds as a conservative default for
+a LAN service — long enough for a slow instance, short enough that an unreachable one fails
+within one UI action. Documented as a comment beside the constant in `settings_keys.py` rather
+than silently invented.
+
+**3. FR-10's "Operator" default group is OctoPrint's `USER_GROUP` ("users").** OctoPrint 2.0 has
+no group literally named "Operator" — `octoprint/access/groups.py` defines the built-in `users`
+group with `"name": "Operator"` as its *display* name. `FILAMENTDB_SELECT`'s `default_groups`
+is `[USER_GROUP]`; `FILAMENTDB_ADMIN`'s is `[ADMIN_GROUP]`. Verified live: the server log on
+startup shows `Added new permission from plugin filamentdb: PLUGIN_FILAMENTDB_SELECT` /
+`_ADMIN` with the expected role needs.
+
+**4. Opted in to Jinja autoescaping (`is_template_autoescaped() -> True`).** Not asked for by the
+PRD or the task prompt, but OctoPrint logs a `WARNING` for every plugin that doesn't override this
+("OctoPrint 2.1.0 will globally enforce autoescaping") — leaving it unset would have meant
+shipping a skeleton that violates "no errors or deprecation warnings" on first boot. Our templates
+never push raw HTML through a variable, so opting in costs nothing.
+
+**5. Real Knockout gotcha: don't cache `settingsViewModel.settings` at viewmodel construction
+time.** First attempt did `self.settings = self.settingsViewModel.settings;` in the
+`FilamentDBViewModel` constructor and bound templates to `settings.plugins.filamentdb`. This
+throws `Cannot read properties of undefined (reading 'plugins')` on every load. Root cause, read
+out of OctoPrint's own `static/js/app/viewmodels/settings.js`: `settingsViewModel.settings` is
+`undefined` until its `requestData()` AJAX call resolves inside `main.js`'s `fetchSettings()` —
+which runs *after* every viewmodel's constructor has already executed. A plain-property capture at
+construction time freezes in that `undefined` forever, since it's an assignment, not a live
+binding. Fix: don't alias `settings` at all; expose `self.settingsViewModel` and bind templates to
+`settingsViewModel.settings.plugins.filamentdb` directly, which OctoPrint's `ko.applyBindings`
+evaluates fresh, after `fetchSettings` has populated the real object. Caught by an actual
+Playwright-driven browser check against the running dev container (see decision 6) — this would
+not have been visible from source review or from the server log alone.
+
+**6. UI verification required a real browser; added one via Playwright rather than skipping the
+check.** No browser tooling was available in-session and none was pre-installed in the sandbox.
+Installed Playwright + Chromium into a throwaway venv under the scratch directory (not committed,
+not part of the plugin) and drove the actual dev-container UI: logged in, opened the sidebar,
+opened Settings → Filament DB, and captured `console` events. This is what caught decision 5's
+binding bug — a log-only check would have reported false success, since the plugin *does* load
+without a Python-side error; the failure is purely client-side. Recommended as the standard way to
+verify future UI-touching prompts against this project rather than trusting server logs alone.
+
+**Gotcha for next time — `docker exec` into the dev container without `PIP_USER=false` installs
+into the bind-mounted `/octoprint/plugins` user site, not the image.** Ran `pip install
+git+.../octoscanner` directly in the running container to satisfy the verification step; without
+`PIP_USER=false` (which `Dockerfile.dev` sets explicitly for exactly this reason) it landed under
+`PYTHONUSERBASE=/octoprint/plugins`, i.e. inside `private_data/octoprint/` on the host, and briefly
+shadowed the container's own `wrapt` with an incompatible version. Cleaned up via `pip uninstall`
+(the stray tree was gitignored and never reached the repo either way). Lesson: run one-off
+tooling like `octoscanner` in an isolated venv outside the container instead — it's static
+analysis over the source tree, it doesn't need OctoPrint installed at all.
+
+## 2026-08-02 — UI integration: inherit OctoPrint's markup, publish through four channels
+
+Researched against the running 2.0.0rc4 container rather than the docs, since 2.0 changed several
+view models. Two goals: look native under theme plugins, and be consumable by third-party dashboards
+without them doing work.
+
+**Theming is solved by *not* being clever.** OctoPrint is Bootstrap 2.3 + Knockout + LESS, and it
+wraps plugin templates in its own markup — the sidebar becomes an `accordion-group` with an
+`accordion-heading`/`accordion-toggle`. Theme plugins (Themeify, UI Customizer) work by CSS-overriding
+OctoPrint's own selectors, so the rule is: **use OctoPrint's and Bootstrap's existing classes and let
+themes restyle us; never hardcode a colour.** The single exception is the filament colour swatch,
+which is literal data.
+
+Corollary worth recording: `sidebar_plugin_filamentdb` / `tab_plugin_filamentdb` etc. are derived
+from the plugin identifier and are what themes and user CSS target — a **public contract**, and
+another reason the identifier can never change. Dark themes are the norm in this ecosystem (the
+reference Spoolman screenshot is dark), so never assume a light background.
+
+**The dashboard question has one specific answer: `octoprint.printer.additional_state_data`.**
+The hook returns a dict which OctoPrint merges into the **printer state payload** under the plugin's
+name and pushes to every client on the state monitor's 0.5 s tick. Dashboards already consume that
+payload, so publishing there means they pick us up with no coupling and no work on their side.
+
+Two constraints read straight off the implementation, both load-bearing:
+
+- The return value is validated as JSON-serialisable; a `ValueError` is logged and dropped.
+- **Any other exception blocklists the hook for the remainder of the session** — `_blocklisted_data_hooks`,
+  never retried until restart. So it must be cheap, defensive, and incapable of throwing: read
+  pre-computed state, no I/O, catch-all returning `{}`.
+
+Payload stays small and stable since it ships twice a second to every client: per tool the spool id,
+label, display name, colour, net remaining and grams used this job, plus connection state. Never the
+library.
+
+Decision: **publish through all four channels deliberately** — the state-data hook for dashboards,
+custom events (`plugin_filamentdb_*`) for other Python plugins, `send_plugin_message` for frontend
+consumers, and the REST API for pull access. They serve different consumers and each is cheap
+compared with someone having to scrape our UI. Emitting custom events also reciprocates what
+`Octoprint-PrusaMMU` does for us.
+
+## 2026-08-02 — Edit-spool (FR-15) copies filament-bridge's semantics rather than inventing them
+
+Future feature: re-weigh a spool on load. You take it off the shelf, put it on a scale, and the
+moment you are already in the plugin is the natural moment to true up the recorded weight.
+
+**`filament-bridge` had already solved this**, in its mobile update card. Rather than design a
+parallel set of semantics for the same database, FR-15 adopts its rules verbatim — a user will
+reasonably expect two of their own tools writing to the same records to behave identically.
+
+Adopted: the entered value is **absolute gross** (the raw scale reading, written as-is because
+Filament DB stores gross); a **live net preview** `gross − tare` while typing; and two save modes
+mirroring `mobile_weight_default_mode` — `direct_correction` (PUT the new weight, the default) and
+`usage` (log the delta as a Filament DB usage entry, preserving the audit trail).
+
+**The rule worth copying most is the one I would have got wrong:** in `usage` mode an *increase*
+must fall back to `direct_correction`. A refill is not negative usage, and recording it as such
+corrupts the usage history.
+
+Scope: this is the first write beyond print-history, so v1's non-goal on that must be revised when it
+lands. It does **not** conflict with C-1's single-write reasoning — that concerns the commit path,
+where a second non-transactional write could half-succeed. This is a separate, user-initiated,
+idempotent action with its own confirmation.
+
+Three v1 seams keep it additive: the sidebar row carries a `⋯` menu from the start (adding an item
+is additive; adding the affordance later is a layout change); the cached spool model keeps gross
+`totalWeight` and the filament's `spoolWeight`, both already fetched for the weight display, for the
+net preview; and the client is structured so a `PUT` is a second method rather than a restructure.
+
+## 2026-08-02 — Sidebar: fixed four-line rows, detail on hover, spool-precise deep links
+
+Revises the earlier sidebar draft, which put `instanceId` behind a settings toggle and `notes` on a
+conditional fifth line. Both were wrong:
+
+- **The hex belongs beside the label**, de-emphasised. It is what NFC/QR resolves against, so it
+  earns permanent space rather than a toggle.
+- **Variable row height was the wrong trade.** A spool with a paragraph of notes would push the rest
+  off screen. Rows are now **fixed at four lines**, which is what lets five MMU slots fit without
+  scrolling, and everything optional — notes, lot number, location, gross weight, tare, dates, last
+  used here — moves to a hover tooltip. None of it is load-bearing, so hiding it costs nothing.
+
+**Deep links are spool-precise.** Verified in Filament DB's source: the filament detail page reads
+`?spool=<id>` from `window.location` and scrolls to and highlights that spool (GH #595) — the same
+mechanism the printed label QRs use. So links are
+`{FILAMENTDB_URL}/filaments/{filamentId}?spool={spoolId}`, never the bare filament. There is still
+no standalone spool page, but the query param lands the user on the right row instead of a list.
+Every spool row gets **Open in Filament DB** in its `⋯` menu, and the bottom bar's button is
+**Open Filament DB** — this plugin has no Spoolman relationship to name.
+
+## 2026-08-02 — UI designed before metering; remaining weight is computed, not stored
+
+**Sequencing changed on the user's argument, and it was the better call.** The plan had been to build
+`metering/odometer.py` first as the pure, highest-risk component. But without a UI the odometer is a
+black box: unit tests prove the state machine against fixtures, yet cannot show whether the hook is
+wired right, whether non-print commands are filtered, or whether pause/resume survives. Those are
+only observable live.
+
+The sharpening: **the first instrument should display raw millimetres**, because millimetres have
+zero dependencies. Grams need an assigned spool, the Filament DB client, a density and the
+conversion. Millimetres need only hook → accumulate → display, so the instrument is buildable before
+any data layer exists — and it is directly checkable against the slicer's `filament used [mm]`,
+which is already FR-5's acceptance bar.
+
+**Weight display is a real model difference, not a label difference.** Spoolman's `615.6g / 1000g` is
+net remaining / nominal net, stored directly. Filament DB stores **gross** on the spool with tare and
+nominal net on the **filament**, so the equivalent must be computed:
+`net = spool.totalWeight − filament.spoolWeight`, over `filament.netFilamentWeight`.
+
+Verified against the live library: all 36 spools have all three fields, with genuinely varying
+per-filament tares (154 / 190 / 200 / 245 g), so the good path is the common one. Degraded paths
+defined anyway, and the important rule is **never show gross as if it were net** — that overstates
+remaining filament by the weight of the reel, roughly 200 g. Label it `gross · tare not set` instead.
+
+Also: net may legitimately exceed nominal on overfilled reels, so clamp the progress *bar* at 100%
+but never the *figure*; and show gross on hover, because a user weighing a spool physically reads
+gross and that is what makes reconciliation possible.
+
+**Crucially this affects display and FR-4's sufficiency check only — never the commit.** The usage
+write sends grams consumed and Filament DB decrements gross itself (C-1). Incomplete inventory
+metadata must never block recording what was actually used.
+
+On identifiers in the sidebar: `label` (`#177`) is always shown as the analogue of Spoolman's `#181`
+and what is physically on the spool; `instanceId` and `lotNumber` are settings toggles defaulting
+off, following `octoprint-spoolman`'s own `showSpoolIdInSidebar` precedent; `notes` appears only when
+non-empty. A debug panel exposing raw odometer state ships behind a setting, because a total that is
+silently wrong looks exactly like one that is right.
 
 ## 2026-08-02 — Tool numbering: 0-based internally, 1-based on screen
 
@@ -393,6 +938,33 @@ and `octoprint.comm.protocol.gcode.received` is the hook for `echo:MMU2:` parsin
 **Test-data gap found while answering Q-1:** the dev Filament DB has 10 filaments / 7 spools, not
 the 200+ of production, and **every record has a non-null density** — so FR-6's density fallback
 chain is currently untestable there. Seed a null-density record before calling FR-6 verified.
+
+## 2026-08-01 — Tool count cannot come from the printer profile alone (FR-3 corrected)
+
+The first draft of FR-3 derived the number of tool slots from
+`printer_profile["extruder"]["count"]`, reasoning that OctoPrint already knows it. Validation
+showed that is unsafe:
+
+- **The MMU tool count is manual user configuration.** OctoPrint knows an MMU3 has 5 tools only
+  because the user set Number of extruders = 5 and ticked Shared nozzle. Prusa's own docs instruct
+  this; nothing enforces or detects it.
+- **`Octoprint-PrusaMMU` does not set it either.** That plugin works at the G-code and
+  firmware-message level (`Tx` interception, `MMU2:` response parsing) and never touches the
+  profile. So a fully working MMU setup can report `extruder.count = 1` while the G-code drives
+  `T0`–`T4`.
+
+Rendering one slot for a five-tool file would charge five tools' filament to one spool — data
+corruption, not a UI annoyance. Slot count is therefore the **union** of the profile count, the
+tool indices in OctoPrint's analysis metadata, and the slicer block's per-extruder array length,
+with a prominent warning when the G-code exceeds the profile.
+
+**Second finding from the same validation:** a plugin can suppress a command at
+`octoprint.comm.protocol.gcode.queuing` (return `None,`), and a suppressed command **never reaches
+`gcode.sent`**. `Octoprint-PrusaMMU` does exactly this to `Tx`. An odometer inferring the active
+tool solely from observed `Tx` can therefore mis-attribute. Mitigation: track the active tool
+defensively against OctoPrint's own state, and cross-check the per-tool split at commit time
+against the slicer's per-extruder `filament used [mm]` array — if the total agrees but the split
+does not, warn instead of writing a confidently wrong attribution.
 
 ## 2026-08-01 — A real MMU3 capture disproved the "every pause is a marker" assumption
 

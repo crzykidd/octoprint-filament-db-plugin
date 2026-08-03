@@ -1,0 +1,195 @@
+/*
+ * Copyright (C) 2026 crzykidd
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ *
+ * OWNS: layout for the plugin's sidebar rows, odometer table, and picker
+ *     modal -- spacing, alignment, fixed row height (PRD §Sidebar: "fixed
+ *     four-line rows, everything else in a hover tooltip"), the picker
+ *     modal's width and its results table's fixed column layout (2026-08-02
+ *     picker UI fixes, fix 1 -- wide enough that a typical filament line
+ *     fits on one line, with an ellipsis-and-title overflow guard for the
+ *     rare pathological name that still wouldn't).
+ * DOES NOT OWN: colour. No colour literals here except where noted -- use
+ *     OctoPrint's and Bootstrap 2's existing semantic classes (.muted,
+ *     .text-error, .label, .progress, ...) and let theme plugins restyle
+ *     us (docs/prd.md, "OctoPrint UI framework"). The one deliberate
+ *     exception is `.filamentdb-swatch`'s `background-color`, which is set
+ *     inline via a Knockout `style` binding from Filament DB's own colour
+ *     data (never a value chosen here) -- this stylesheet only gives the
+ *     swatch its shape.
+ */
+
+.filamentdb-sidebar {
+    padding: 4px 0;
+}
+
+.filamentdb-row {
+    padding: 4px 0;
+    border-bottom: 1px solid rgba(128, 128, 128, 0.2);
+}
+
+.filamentdb-row:last-child {
+    border-bottom: none;
+}
+
+.filamentdb-line1 {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.filamentdb-tool-label {
+    font-weight: bold;
+    flex: 1;
+}
+
+.filamentdb-row-actions {
+    white-space: nowrap;
+}
+
+.filamentdb-action {
+    margin-left: 6px;
+}
+
+.filamentdb-more {
+    vertical-align: middle;
+}
+
+.filamentdb-more .dropdown-toggle {
+    display: inline-block;
+    padding: 0 4px;
+    font-weight: bold;
+    line-height: 16px;
+}
+
+.filamentdb-swatch {
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    border: 1px solid rgba(128, 128, 128, 0.4);
+    flex: 0 0 auto;
+}
+
+.filamentdb-row-detail {
+    /* Fixed height for lines 2-4 -- keeps every row the same size so
+       several MMU slots fit without scrolling (PRD §Sidebar). */
+    line-height: 1.4em;
+}
+
+.filamentdb-line2,
+.filamentdb-line3,
+.filamentdb-line4 {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.filamentdb-empty {
+    line-height: 1.4em;
+}
+
+.filamentdb-bar {
+    display: inline-block;
+    width: 80px;
+    height: 10px;
+    margin: 0 6px;
+    vertical-align: middle;
+}
+
+.filamentdb-percent {
+    font-size: 0.9em;
+}
+
+.filamentdb-instance-id {
+    font-family: monospace;
+}
+
+.filamentdb-bottom-bar {
+    margin-top: 6px;
+    padding-top: 6px;
+    border-top: 1px solid rgba(128, 128, 128, 0.2);
+    display: flex;
+    gap: 6px;
+}
+
+.filamentdb-odometer {
+    margin-top: 6px;
+}
+
+/* -- picker modal -------------------------------------------------- */
+
+.filamentdb-picker-modal {
+    /* Widened (fix 1, 2026-08-02 picker UI fixes) so a typical
+       "[TYPE] Name (Vendor)" line -- e.g. "[PLA] Amolen PLA Matte Dual
+       Color Green Purple (Amolen)" -- fits on one line instead of
+       wrapping to six. Bootstrap 2's modal.js recalculates
+       `margin-left: -width/2` on show(), so only `width` needs setting
+       here. `max-width` keeps it from overflowing a narrow viewport. */
+    width: 900px;
+    max-width: 95vw;
+}
+
+.filamentdb-picker-modal .modal-body {
+    max-height: 60vh;
+    overflow-y: auto;
+}
+
+.filamentdb-picker-search {
+    margin-bottom: 8px;
+}
+
+.filamentdb-picker-filters {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 8px;
+}
+
+.filamentdb-picker-filter {
+    max-width: 160px;
+}
+
+.filamentdb-picker-results {
+    /* Fixed layout so the Filament column's ellipsis guard (below) can
+       actually clip instead of the table just growing to fit content --
+       every other column gets an explicit width (via these classes, set
+       on <th> since fixed layout takes column widths from the first row)
+       and .filamentdb-col-filament is the one deliberately left unset, so
+       it absorbs whatever width remains. Column count changes (the Match
+       column, fix 4) still work: these are class selectors, not
+       positional ones, so nothing shifts when it's added or removed. */
+    table-layout: fixed;
+    width: 100%;
+}
+
+.filamentdb-col-swatch {
+    width: 28px;
+}
+
+.filamentdb-col-label {
+    width: 110px;
+}
+
+.filamentdb-col-weight {
+    width: 130px;
+}
+
+.filamentdb-col-match {
+    width: 170px;
+}
+
+.filamentdb-col-select {
+    width: 60px;
+}
+
+.filamentdb-picker-filament {
+    /* Overflow guard only (fix 1) -- not the primary fix, which is
+       widening the modal above. This only fires for a name pathological
+       enough to still overflow a 900px modal; keeps the row a single
+       line via `title: filamentLineTitle` carrying the full text. */
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
