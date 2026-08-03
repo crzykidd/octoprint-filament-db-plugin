@@ -65,15 +65,10 @@ asked to open one. The merge needs its own yes.
 > standards are adopted; this note is the deviation, and it is recorded in `standards.md`.
 > The **`main` gate is not relaxed** — if anything it is stricter than the standard requires.
 
-**How this went wrong (2026-08-02, PR #2):** the user said *"push these commits to github"*. Every
-commit was already on `origin/dev`, so the only thing left to "push" looked like the `dev → main`
-PR. The session announced it would open **and merge** the PR, the user's next message was about an
-unrelated topic, and the merge was treated as approved. **Silence is not consent, and neither is an
-unchallenged plan.** The correct action was: push `dev`, then say `main` is N commits behind and ask
-whether to open a PR.
-
-Note that PR #1 *was* legitimate — the user said *"let's PR dev to main and merge it"*. That is what
-explicit permission looks like. Match that bar.
+**This was violated once** — PR #2, merged on an unchallenged plan rather than an instruction.
+**Silence is not consent, and neither is a plan nobody contradicted.** Full account in
+`docs/decisions.md` (2026-08-02). The bar to match is PR #1, where the user said *"let's PR dev to
+main and merge it"* — explicit, and naming the merge.
 
 ## Task → file routing
 
@@ -121,7 +116,42 @@ change:
 - **`plugin.py` is wiring only** — the moment a method makes a decision, it belongs in a module
   the tests can reach without booting OctoPrint.
 - Tests mirror source paths 1:1.
-- Keep this file under ~200 lines. If it drifts, move content to the PRD and leave a pointer.
+- Keep **project-authored prose in this file under ~150 lines** — the three verbatim
+  `CLAUDE-snippet.md` blocks below are mandated by the adopted standards and sit outside the cap
+  (PRD N-9). If our own prose drifts over, move it to the PRD and leave a pointer; never trim the
+  snippets.
+
+<!--
+Source: standards/code-checkin-and-pr @ v1.2.0 (crzynet/homelab-configs).
+Paste the section below verbatim into the adopting project's CLAUDE.md.
+The full standard (publishing matrix, retention, CI check definitions) lives at:
+https://gitea.crzynet.com/crzynet/homelab-configs/src/branch/main/standards/code-checkin-and-pr/README.md
+-->
+
+## Code check-in (operational rules)
+
+This project adopts the `code-checkin-and-pr` standard. The full why-and-how lives at
+the source above; the rules below are the per-session do/don'ts a coding agent must
+honor by default:
+
+- **Never push directly to `main`.** `main` is protected. All changes land via a pull
+  request from `dev` → `main`, and only when every required check is green.
+- **Day-to-day work happens on `dev`** (or a short-lived branch off `dev`). Push to
+  `dev` freely.
+- **Commit message prefixes are required** — Conventional-Commits style:
+  - `feat:` — new user-facing feature
+  - `fix:` — bug fix
+  - `chore:` — config, tooling, dependencies, maintenance
+  - `docs:` — documentation-only changes
+- **Do not add `Co-authored-by:` trailers** unless the user explicitly asks.
+- **Doc updates ship in the same commit as the code they describe** — never as a
+  follow-up commit.
+- **Never bypass hooks** (no `--no-verify`, `--no-gpg-sign`, etc.) unless the user
+  explicitly asks. If a hook fails, fix the underlying issue.
+- **Stable releases are tagged from `main` only.** Don't tag from `dev`.
+
+If you're unsure whether an action would violate one of the above, stop and ask before
+acting.
 
 <!--
 Source: standards/handoff-prompt-workflow @ v2.0.0 (crzynet/homelab-configs).

@@ -436,9 +436,16 @@ structural change. This is the highest-leverage item on the list: it converts "s
 | Doc | Read when | Cap |
 |---|---|---|
 | `prompts/startnewsession.md` | first thing, every session | ~200 lines |
-| `CLAUDE.md` | every session, as reference | ~200 lines |
+| `CLAUDE.md` | every session, as reference | **~150 lines of project-authored prose**, *excluding* the standards' mandatory verbatim `CLAUDE-snippet.md` blocks |
 | `docs/prd.md` | designing or implementing a feature | uncapped (it's the spec) |
 | `docs/decisions.md` | before re-deriving a design | append-only |
+
+**The cap counts what we wrote, not what we were handed.** Three adopted standards each require
+their `CLAUDE-snippet.md` pasted **verbatim and inline** — a pointer is explicitly not sufficient for
+rules a session must honour by default. That is ~120 lines this project cannot edit or relocate.
+Capping the total would mean either deleting our own highest-value content (the task→file routing
+table) or violating an adoption requirement. So the cap applies to project-authored prose only, and
+the snippets sit outside it.
 
 `CLAUDE.md` must not grow into a second PRD. When it drifts toward the cap, the content moves to the
 PRD and `CLAUDE.md` keeps a pointer. The session brief is a *state* document — what's in flight —

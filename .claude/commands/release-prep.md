@@ -7,42 +7,50 @@ argument-hint: <version>   (e.g. 0.3.6)
 Template from standards/release-prep-and-cut @ v1.0.0
 (crzynet/homelab-configs/standards/release-prep-and-cut/README.md).
 
-Before using this command, replace every <PLACEHOLDER> below with your
-project's value. The placeholders are:
+Placeholders are RESOLVED for this project (octoprint-filament-db-plugin).
+Values below are the live ones -- do not re-parameterise them.
 
-  <VERSION_FILE>             Path to the canonical version file.
-                             Examples:
-                               - backend/version.py    (Python: __version__ = "X.Y.Z")
-                               - package.json          (Node:   "version": "X.Y.Z")
-                               - Cargo.toml            (Rust:   version = "X.Y.Z")
-                               - pyproject.toml        (Python: version = "X.Y.Z")
+  <VERSION_FILE>             octoprint_filamentdb/_version.py
+                             Single source of truth. pyproject.toml reads it via
+                             [tool.setuptools.dynamic]; __init__.py reads it for
+                             __plugin_version__. Neither declares its own copy, so
+                             this file is the ONLY place the number changes.
 
-  <VERSION_LITERAL>          How the bare version is written in that file
-                             (literal substring to find / replace).
-                             Examples:
-                               - __version__ = "<current>"
-                               - "version": "<current>"
+  <VERSION_LITERAL>          __version__ = "<current>"
 
-  <README_BADGE_PATTERN>     How the version appears in the README badge.
-                             Example: version-<current>-gold
+  <README_BADGE_PATTERN>     (none -- the README carries CI/CodeQL status badges,
+                             not a version badge. Skip this step; do not invent one.)
 
-  <README_WHATSNEW_SECTION>  Heading of the README "What's New" section
-                             where the new release entry is inserted at top.
-                             Example: ## What's New
+  <README_WHATSNEW_SECTION>  (none -- CHANGELOG.md is the single source of release
+                             notes and the README links to it. Do NOT duplicate
+                             release notes into the README.)
 
-  <DOCS_TO_SYNC>             List of doc files and what to update in each.
-                             Examples:
-                               - docs/PRD.md   revision-history table + version annotations
-                               - CLAUDE.md     Build Status block (Current release target / Last shipped public release)
+  <DOCS_TO_SYNC>             - CHANGELOG.md   roll [Unreleased] into the new version
+                                              section; keep Known limitations honest
+                             - README.md      the "Unreleased -- early development"
+                                              banner and the Status section, IF the
+                                              release changes what is true there
+                             - prompts/startnewsession.md   "Current state" releases line
 
-  <LOCAL_CHECKS>             Exact commands CI runs. Examples:
-                               - ruff check backend/
-                               - cd backend && DATABASE_URL=sqlite:///./_release_check.db alembic upgrade head && alembic current
-                               - docker compose config --quiet
-                               - python -c "import yaml; yaml.safe_load(open('backend/defaults.yaml'))"
+  <LOCAL_CHECKS>             Exactly what CI runs (.github/workflows/ci.yml) -- run all
+                             of these and they must all pass before opening the PR:
+                               - ruff check octoprint_filamentdb/ tests/
+                               - ruff format --check octoprint_filamentdb/ tests/
+                               - pytest            (includes the Node-run JS test;
+                                                    node must be present or it FAILS,
+                                                    by design -- it must not skip)
+                               - python -m build && twine check dist/*
+                               - docker compose -f docker-compose.dev.yml config --quiet
+                             CI additionally runs the test suite on Python 3.9 AND 3.13;
+                             locally one interpreter is acceptable, but a release that
+                             changes syntax or stdlib use must be checked against 3.9.
 
-  <CHANGELOG_ARCHIVE_DIR>    Where per-minor archive files live.
-                             Default: docs/   (archive files: docs/CHANGELOG-<minor>.x.md)
+  <CHANGELOG_ARCHIVE_DIR>    docs/            (archive files: docs/CHANGELOG-<minor>.x.md)
+
+  PROJECT-SPECIFIC RULE -- READ THIS:
+  This command NEVER merges the PR. It prepares, pushes, and opens the PR, then
+  STOPS. Merging to main is the user's gate (see CLAUDE.md). /release-cut runs
+  only after the user has merged and main CI is green.
 -->
 
 # Release Prep
@@ -65,7 +73,7 @@ release.
   not match `MAJOR.MINOR.PATCH` exactly (three integers, dot-separated, no
   pre-release/build suffix), STOP and ask for a valid version.
 - Reminder on the `v` convention: the version is stored and used BARE
-  everywhere (`<VERSION_FILE>`, changelog header, README badge, in-code image
+  everywhere (`octoprint_filamentdb/_version.py`, changelog header, README badge, in-code image
   tags). The `v` prefix is added in exactly one place — the git tag / GitHub
   release — and that happens in `/release-cut`, not here.
 
@@ -74,7 +82,7 @@ release.
 1. Confirm the current branch is `dev`. If not, STOP and report.
 2. Confirm the working tree is clean (`git status --porcelain` empty). If
    there are uncommitted changes, STOP and show them — the user must decide.
-3. Read the current version from `<VERSION_FILE>`. Parse both the current
+3. Read the current version from `octoprint_filamentdb/_version.py`. Parse both the current
    version and `$ARGUMENTS` into `(MAJOR, MINOR, PATCH)` integer triples for
    comparison.
 
@@ -133,7 +141,7 @@ Do not proceed on any warned tier without a clear affirmative ("yes",
 
 ## Step 1 — Bump the version
 
-Update `<VERSION_FILE>` so the literal `<VERSION_LITERAL>` reflects
+Update `octoprint_filamentdb/_version.py` so the literal `__version__ = "<current>"` reflects
 `$ARGUMENTS`. This is the single source of truth — CI and the in-app version
 display both read from it. Do not touch helper functions or surrounding code.
 
@@ -164,7 +172,7 @@ such closed series `<minor>.x`:
 
 1. **Move the full detail to the archive.** Move the entire series (all its
    `## [<minor>.PATCH] — <date>` blocks, full content) out of `CHANGELOG.md` into
-   `<CHANGELOG_ARCHIVE_DIR>/CHANGELOG-<minor>.x.md`, newest-first, matching the
+   `docs/CHANGELOG-<minor>.x.md`, newest-first, matching the
    format of any existing archive file. Full Keep-a-Changelog detail is preserved
    here.
 2. **Leave a summary in the active file.** In place of each moved version, write a
@@ -175,7 +183,7 @@ such closed series `<minor>.x`:
      keep user-visible features and significant fixes. Phrase each as a tight
      one-liner.
    - End the block with a deep link to the full archived section, e.g.
-     `[Full notes →](<CHANGELOG_ARCHIVE_DIR>/CHANGELOG-<minor>.x.md#<anchor>)`
+     `[Full notes →](docs/CHANGELOG-<minor>.x.md#<anchor>)`
      (anchor = the GitHub-style slug of the full header, e.g. `031--2026-06-21`).
 3. Prepend a link to each new archive file in the "Archived releases" index at the
    bottom of `CHANGELOG.md` (create the index if absent).
@@ -187,10 +195,12 @@ such closed series `<minor>.x`:
 
 In `README.md`:
 
-1. Update the version badge: in `<README_BADGE_PATTERN>`, replace the current
+1. SKIP -- this project has no version badge (README carries CI/CodeQL status badges only).
+   Historical step text: in `<README_BADGE_PATTERN>`, replace the current
    version with `$ARGUMENTS` (e.g. `version-<old>-gold` → `version-$ARGUMENTS-gold`).
 2. Add a `### v$ARGUMENTS (<today>)` entry at the top of the
-   `<README_WHATSNEW_SECTION>` section, summarising this release in
+   SKIP -- CHANGELOG.md is the single source of release notes; do NOT duplicate them into the
+   README. Historical step text: `<README_WHATSNEW_SECTION>` section, summarising this release in
    user-facing language drawn from the changelog entries you just rolled. Keep
    it consistent with the voice of the existing entries.
 3. Update any top-of-file new-in banner / one-line status blurb to reference
@@ -198,7 +208,7 @@ In `README.md`:
 
 ## Step 5 — Sync long-form docs
 
-For each entry in `<DOCS_TO_SYNC>`:
+For each entry in `CHANGELOG.md, README.md, prompts/startnewsession.md`:
 
 1. Apply the per-file update listed (e.g. add a row to a Revision History
    table with today's date and a one-line summary drawn from the changelog;
@@ -210,12 +220,12 @@ For each entry in `<DOCS_TO_SYNC>`:
 ## Step 6 — Validate locally BEFORE committing
 
 Run the same checks CI will run, so a red PR is caught now. The minimum
-matrix is `<LOCAL_CHECKS>`; run each in order. If ANY check fails, STOP,
+matrix is `ruff check + ruff format --check + pytest + python -m build && twine check dist/* + docker compose -f docker-compose.dev.yml config --quiet`; run each in order. If ANY check fails, STOP,
 report exactly what failed, and do not commit.
 
 Also grep for version-string drift: confirm no stale `<old-version>`
-references remain in `README.md`, `<VERSION_FILE>`, or any file listed in
-`<DOCS_TO_SYNC>`. Report any other occurrences you find rather than blindly
+references remain in `README.md`, `octoprint_filamentdb/_version.py`, or any file listed in
+`CHANGELOG.md, README.md, prompts/startnewsession.md`. Report any other occurrences you find rather than blindly
 editing.
 
 ## Step 7 — Commit
@@ -226,7 +236,7 @@ body that lists what changed. Template:
 ```
 chore(release): prepare v$ARGUMENTS
 
-- <VERSION_FILE> bumped to $ARGUMENTS
+- octoprint_filamentdb/_version.py bumped to $ARGUMENTS
 - CHANGELOG: rolled [Unreleased] → [$ARGUMENTS] — <today>
 - README: version badge + What's New entry
 - <one line per doc in DOCS_TO_SYNC>
