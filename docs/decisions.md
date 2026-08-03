@@ -6,6 +6,31 @@ reader would otherwise have to re-derive.
 
 ---
 
+## 2026-08-03 — Git rules are three tiers; only the `main` gate is absolute
+
+Clarifies (and partly relaxes) what the 2026-08-02 entry below documented. That entry was written
+immediately after an unauthorised merge and over-corrected — it locked down committing as well,
+which was never the problem.
+
+| Action | Rule |
+|---|---|
+| Commit to `dev` | **always allowed**, no approval needed |
+| Push `dev` | **normally on request**, but not forbidden — push when the task needs it |
+| Reach `main` | **only via a PR the user merges.** Never merge, never push to `main`, never tag |
+
+**Only the third tier is absolute.** The failure being guarded against was never "an agent
+committed"; it was an agent deciding on its own that work should land on `main`. Conflating the two
+made the rules noisier without making them safer — and noisy rules get skimmed.
+
+This is a **deliberate deviation** from `handoff-prompt-workflow`, whose pasted snippet says
+*"ask `y/n` before committing, never auto-commit, never push."* The snippet stays verbatim, because
+that is how the standard is adopted; the override lives in `CLAUDE.md` and the deviation is recorded
+in `standards.md`'s Notes column, which is what that column is for.
+
+Note the deviation runs in **both** directions: looser on committing, **stricter on `main`** than
+the standard requires. The standard only asks that release commits reach `main` via PR; this project
+additionally forbids an agent from performing the merge at all.
+
 ## 2026-08-02 — CI + CodeQL: the Python 3.9 floor is real, ruff's *defaults* drift across
 versions independent of the version pin, and `octoscanner` needs its own repo checked out
 

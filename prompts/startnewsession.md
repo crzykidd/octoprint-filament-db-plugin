@@ -61,9 +61,12 @@ Re-derived by more than one session already; internalize them before touching co
   `prompts/failed/`.
 
 **Git**
-- **Ask before committing. Never auto-commit. Never push.** Stage specific paths — never
-  `git add -A`.
-- One commit at the end; the prompt file bundles into it.
+- **Committing to `dev` is always allowed** — no need to ask. **Pushing is normally on request**,
+  but not forbidden; push when the task needs it (CI only runs on pushed commits) and say what you
+  pushed. This overrides the `handoff-prompt-workflow` snippet's ask-before-commit default; see
+  `CLAUDE.md` and the deviation note in `standards.md`.
+- Stage specific paths — **never `git add -A`**. One coherent commit per task; the prompt file
+  bundles into it.
 - Check `git status --porcelain` before editing; if the user is mid-edit on a file the plan
   touches, list it and ask.
 - **Work on `dev`. `main` is protected** — PRs only, force-push and deletion blocked, and

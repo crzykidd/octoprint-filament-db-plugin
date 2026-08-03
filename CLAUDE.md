@@ -47,17 +47,23 @@ engineering choice, recorded in `docs/decisions.md`. New source files carry an A
 a deliberate process run through `/release-prep` and `/release-cut` — not a tidy-up step at the end
 of a work session.
 
-| You may | You may NOT |
+Three tiers, loosest to strictest:
+
+| Action | Rule |
 |---|---|
-| commit on `dev` (after asking) | merge **any** PR, ever |
-| `git push origin dev` (when asked) | run `gh pr merge` |
-| open a PR **if explicitly asked to** | merge a PR you were asked to *open* |
-| — | push to `main` (protection blocks it anyway) |
-| — | tag a release, or publish one |
+| **Commit to `dev`** | **Always allowed.** Agents may commit freely; no need to ask. Still one coherent commit per task, conventional prefix, specific paths — never `git add -A`. |
+| **Push `dev`** | **Normally on request.** Not forbidden — push when the task needs it (CI only runs on pushed commits, for instance) or when asked. Use judgement; say what you pushed. |
+| **Anything reaching `main`** | **The user's gate. Only via PR, and the merge is theirs.** Never `gh pr merge`. Never push to `main`. Never tag or publish a release. |
 
 **"Push" NEVER means "merge".** They are different requests. If the user says *push*, push the
-branch and stop. If they want `main` updated they will say so, and even then: **opening a PR is not
-permission to merge it.** Ask, and wait for an explicit yes on the merge itself.
+branch and stop. And **opening a PR is not permission to merge it** — even when you were explicitly
+asked to open one. The merge needs its own yes.
+
+> **Project deviation from `handoff-prompt-workflow`.** The standard's pasted snippet below says
+> *"ask `y/n` before committing, never auto-commit, never push."* **This project overrides the first
+> two:** committing to `dev` needs no approval. The snippet is left verbatim because that is how
+> standards are adopted; this note is the deviation, and it is recorded in `standards.md`.
+> The **`main` gate is not relaxed** — if anything it is stricter than the standard requires.
 
 **How this went wrong (2026-08-02, PR #2):** the user said *"push these commits to github"*. Every
 commit was already on `origin/dev`, so the only thing left to "push" looked like the `dev → main`
