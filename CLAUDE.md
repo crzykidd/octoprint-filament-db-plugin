@@ -63,7 +63,7 @@ commit as any structural change — PRD rule N-8.*
 | History UI, failure report, retry & discard actions | `static/js/filamentdb.js`, `api.py` | FR-9b |
 | Print lifecycle events, cancel double-fire | `job.py` | FR-7 |
 | Tool slots, MMU, extruder count | `static/js/filamentdb.js` (`toolCount`, reads `printerProfilesViewModel.currentProfileData()` — **not** `currentProfile()`, which is just the id string) | FR-3 |
-| Spool search ranking (five-tier match order) | `static/js/filamentdb-search.js` — the sole implementation (must run client-side, FR-2); tested via `tests/js/filamentdb_search_test.js` + `tests/test_search_ranking_js.py` (Node, run inside the normal `pytest` invocation) | FR-2 |
+| Spool search ranking (six-tier match order) | `static/js/filamentdb-search.js` — the sole implementation (must run client-side, FR-2); tested via `tests/js/filamentdb_search_test.js` + `tests/test_search_ranking_js.py` (Node, run inside the normal `pytest` invocation) | FR-2 |
 | Picker modal: filters, sort, assign/clear, duplicate-warning UI | `static/js/filamentdb-picker.js`, `templates/filamentdb_sidebar.jinja2` | FR-2 |
 | Pre-print confirmation dialog; Print button not gated | `static/js/filamentdb.js` (wraps `printerStateViewModel.print` **and** `loadAndPrint`) | FR-4, Q-9 |
 | Sidebar rows / live odometer readout | `static/js/filamentdb.js`, `templates/filamentdb_sidebar.jinja2` | FR-2, FR-8 |

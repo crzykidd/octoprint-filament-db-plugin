@@ -77,6 +77,11 @@ FILAMENTS_LIST = [
     }
 ]
 
+LOCATIONS_LIST = [
+    {"_id": "6a385c81a66ab307b7f9b5d3", "name": "Bin 1 - PLA"},
+    {"_id": "6a385c81a66ab307b7f9b5d4", "name": "Bin 2 - PETG"},
+]
+
 SPOOL_DETAIL = {
     "filament": {
         "_id": "6a6eca19a3360ac295bfafd9",
@@ -221,6 +226,26 @@ def test_get_spool_missing_filament_or_spool_key_is_invalid_response():
     client = FilamentDBClient("http://fdb.local:3000", session=session)
     with pytest.raises(InvalidResponse):
         client.get_spool("whatever")
+
+
+# -- get_locations() -- resolves locationId -> name (C-3b) -----------------
+
+
+def test_get_locations_parses_id_and_name():
+    session = FakeSession(response=FakeResponse(200, LOCATIONS_LIST))
+    client = FilamentDBClient("http://fdb.local:3000", session=session)
+    locations = client.get_locations()
+    assert len(locations) == 2
+    assert locations[0].id == "6a385c81a66ab307b7f9b5d3"
+    assert locations[0].name == "Bin 1 - PLA"
+    assert session.last_url == "http://fdb.local:3000/api/locations"
+
+
+def test_get_locations_unexpected_json_shape_raises_invalid_response():
+    session = FakeSession(response=FakeResponse(200, {"not": "a list"}))
+    client = FilamentDBClient("http://fdb.local:3000", session=session)
+    with pytest.raises(InvalidResponse):
+        client.get_locations()
 
 
 # -- get_version() -- the Test Connection probe (FR-1) ----------------------

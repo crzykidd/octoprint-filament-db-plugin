@@ -5,20 +5,25 @@
 //     material/location/hide-retired filters, ranking the cache via
 //     FilamentDBSearch.rank() (FR-2, no request per keystroke), the
 //     default label-ascending sort (TODO(FR-9b): should be "most recently
-//     used on this printer" once the write journal exists), the
-//     duplicate-assignment confirmation, and issuing the "assign" API
-//     command. Split out of filamentdb.js to keep that file under the
-//     500-line module cap (PRD N-1); `FilamentDBPicker.attach(self)` is
-//     called once from FilamentDBViewModel's constructor and adds these
-//     observables/methods directly onto the shared viewmodel instance, so
-//     the sidebar and picker templates bind against one `self` as usual.
+//     used on this printer" once the write journal exists), whether the
+//     Match column is showing at all (`pickerSearching` -- empty with no
+//     active query, since an always-empty column reads as broken; fix 4,
+//     2026-08-02 picker UI fixes), the duplicate-assignment confirmation,
+//     and issuing the "assign" API command. Split out of filamentdb.js to
+//     keep that file under the 500-line module cap (PRD N-1);
+//     `FilamentDBPicker.attach(self)` is called once from
+//     FilamentDBViewModel's constructor and adds these observables/
+//     methods directly onto the shared viewmodel instance, so the sidebar
+//     and picker templates bind against one `self` as usual.
 // DOES NOT OWN: the ranking algorithm itself (filamentdb-search.js), the
 //     weight computation (server-side only, weights.py -- each library
-//     row already carries the `weightText`/`weightPercent` api.py
-//     computed, this file just renders it), or the library cache/sidebar
-//     rows it reads (`self.library`, `self.toolLabel`, `self.toolForSpool`,
-//     `self.loadLibrary`, `self.libraryLoaded` -- all set up by
-//     filamentdb.js before calling attach()).
+//     row already carries the `weightPickerText` api.py computed for this
+//     column specifically, this file just renders it), resolving
+//     locationId -> name (filamentdb.js's loadLibrary() denormalises
+//     `locationName` onto each row before this file ever sees it), or the
+//     library cache/sidebar rows it reads (`self.library`, `self.toolLabel`,
+//     `self.toolForSpool`, `self.loadLibrary`, `self.libraryLoaded` -- all
+//     set up by filamentdb.js before calling attach()).
 
 (function (global) {
     "use strict";
@@ -36,6 +41,8 @@
                 return "exact id match";
             case FilamentDBSearch.TIER_LABEL_PREFIX:
                 return "label starts with your search";
+            case FilamentDBSearch.TIER_INSTANCE_ID_PREFIX:
+                return "tag id starts with your search";
             case FilamentDBSearch.TIER_FUZZY:
                 return "fuzzy match";
             default:
@@ -81,14 +88,36 @@
             return Object.keys(seen).sort();
         });
 
+        // {id, name} pairs, one per distinct locationId actually present in
+        // the library, sorted by the resolved name -- not the raw id
+        // (fix 5, 2026-08-02 picker UI fixes). A spool whose locationId
+        // didn't resolve to a name (unknown/missing) is excluded from the
+        // filter entirely rather than showing a blank or a GUID option.
         self.pickerLocations = ko.pureComputed(function () {
             var seen = {};
             self.library().forEach(function (row) {
-                if (row.locationId) {
-                    seen[row.locationId] = true;
+                if (row.locationId && row.locationName) {
+                    seen[row.locationId] = row.locationName;
                 }
             });
-            return Object.keys(seen).sort();
+            return Object.keys(seen)
+                .map(function (id) {
+                    return { id: id, name: seen[id] };
+                })
+                .sort(function (a, b) {
+                    return a.name.localeCompare(b.name, undefined, { numeric: true });
+                });
+        });
+
+        // Whether the Match column has anything to show at all -- ranking
+        // (and therefore a tier) only exists while there's an active
+        // query; with an empty search box, results come from the plain
+        // label-ascending sort below and carry no tier. An always-present,
+        // always-empty column reads as broken, so the template hides the
+        // whole column (header included) when this is false (fix 4,
+        // 2026-08-02 picker UI fixes).
+        self.pickerSearching = ko.pureComputed(function () {
+            return !!(self.pickerQuery() || "").trim();
         });
 
         self.pickerResults = ko.pureComputed(function () {
@@ -136,8 +165,19 @@
                     tierLabel: tierLabel(result.tier),
                     // Server-computed (C-2, weights.py) -- already on the
                     // row from filamentdb.js's loadLibrary(), no
-                    // client-side arithmetic here.
-                    weightText: row.weightText,
+                    // client-side arithmetic here. This is the picker
+                    // column's own compact "net / gross" format, not the
+                    // sidebar's full-ratio weightText (fix 2, 2026-08-02
+                    // picker UI fixes).
+                    weightText: row.weightPickerText,
+                    // Overflow guard only (fix 1, 2026-08-02 picker UI
+                    // fixes): the modal is widened so a typical filament
+                    // line fits on one line; this is the full text for the
+                    // `title` tooltip on the rare pathological name CSS
+                    // still has to clip with an ellipsis, not a second
+                    // rendering of the line.
+                    filamentLineTitle:
+                        "[" + (row.type || "") + "] " + (row.name || "") + " (" + (row.vendor || "") + ")",
                     swatch: row.color || "#808080",
                     alreadyAssigned: assignedTool !== null,
                     alreadyAssignedLabel:

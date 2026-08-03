@@ -128,7 +128,7 @@
             <select class="filamentdb-picker-filter" data-bind="value: pickerLocationFilter">
                 <option value="">{{ _('All locations') }}</option>
                 <!-- ko foreach: pickerLocations -->
-                <option data-bind="value: $data, text: $data"></option>
+                <option data-bind="value: id, text: name"></option>
                 <!-- /ko -->
             </select>
         </div>
@@ -136,12 +136,14 @@
         <table class="table table-condensed table-hover filamentdb-picker-results">
             <thead>
                 <tr>
-                    <th></th>
-                    <th>{{ _('Label') }}</th>
-                    <th>{{ _('Filament') }}</th>
-                    <th>{{ _('Weight') }}</th>
-                    <th>{{ _('Match') }}</th>
-                    <th></th>
+                    <th class="filamentdb-col-swatch"></th>
+                    <th class="filamentdb-col-label">{{ _('Label') }}</th>
+                    <th class="filamentdb-col-filament">{{ _('Filament') }}</th>
+                    <th class="filamentdb-col-weight">{{ _('Remaining / Scale') }}</th>
+                    <!-- ko if: pickerSearching -->
+                    <th class="filamentdb-col-match">{{ _('Match') }}</th>
+                    <!-- /ko -->
+                    <th class="filamentdb-col-select"></th>
                 </tr>
             </thead>
             {# The click handler lives on the button only (not the <tr>
@@ -157,19 +159,31 @@
                     <td>
                         #<span data-bind="text: row.label"></span>
                         <span class="muted filamentdb-instance-id" data-bind="text: row.instanceId"></span>
+                        {# The duplicate-assignment badge lives here, not in
+                           the Match column -- it's about the spool itself
+                           (FR-2), not search relevance, so it must stay
+                           visible even when the Match column is hidden
+                           (fix 4) because the search box is empty. #}
+                        <span class="label label-warning" data-bind="visible: alreadyAssigned">
+                            {{ _('already on') }} <span data-bind="text: alreadyAssignedLabel"></span>
+                        </span>
                     </td>
-                    <td>
+                    {# Overflow guard only (fix 1) -- the modal is widened
+                       (see filamentdb.css) so a typical filament line fits
+                       on one line; the ellipsis + title tooltip below only
+                       fire for a pathological name that would otherwise
+                       wrap the row to several lines. #}
+                    <td class="filamentdb-picker-filament" data-bind="attr: {title: filamentLineTitle}">
                         [<span data-bind="text: row.type"></span>]
                         <span data-bind="text: row.name"></span>
                         (<span data-bind="text: row.vendor"></span>)
                     </td>
                     <td data-bind="text: weightText"></td>
+                    <!-- ko if: $parent.pickerSearching -->
                     <td>
-                        <span class="muted" data-bind="visible: tierLabel, text: tierLabel"></span>
-                        <span class="label label-warning" data-bind="visible: alreadyAssigned">
-                            {{ _('already on') }} <span data-bind="text: alreadyAssignedLabel"></span>
-                        </span>
+                        <span class="muted" data-bind="text: tierLabel"></span>
                     </td>
+                    <!-- /ko -->
                     <td><button class="btn btn-mini" data-bind="click: $parent.selectSpool">{{ _('Select') }}</button></td>
                 </tr>
             </tbody>

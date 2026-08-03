@@ -34,6 +34,7 @@ var EXACT_LABEL = FilamentDBSearch.TIER_EXACT_LABEL;
 var EXACT_INSTANCE_ID = FilamentDBSearch.TIER_EXACT_INSTANCE_ID;
 var EXACT_ID = FilamentDBSearch.TIER_EXACT_ID;
 var LABEL_PREFIX = FilamentDBSearch.TIER_LABEL_PREFIX;
+var INSTANCE_ID_PREFIX = FilamentDBSearch.TIER_INSTANCE_ID_PREFIX;
 var FUZZY = FilamentDBSearch.TIER_FUZZY;
 
 // Same fixture as the deleted Python test, translated to the JS row shape
@@ -97,12 +98,17 @@ test("exact label ranks first and is labelled exact", function () {
     assert.strictEqual(results[0].tier, EXACT_LABEL);
 });
 
-test("exact label beats a fuzzy hit on a different row", function () {
+test("exact label beats an instanceId-prefix hit on a different row", function () {
     // "9" is spool sfuzzy's exact label -- assert the tier assignment
-    // itself, not just ordering.
+    // itself, not just ordering. It also happens to prefix-match s177's
+    // instanceId ("970fdbcd56"), which is fine: that's the instanceId
+    // prefix tier doing its job, just ranked below the exact label.
     var results = rank(ROWS, "9");
-    assert.strictEqual(results.length, 1);
+    assert.strictEqual(results[0].row.spoolId, "sfuzzy");
     assert.strictEqual(results[0].tier, EXACT_LABEL);
+    assert.strictEqual(results[1].row.spoolId, "s177");
+    assert.strictEqual(results[1].tier, INSTANCE_ID_PREFIX);
+    assert.strictEqual(results.length, 2);
 });
 
 test("exact instance id ranks before prefix and fuzzy", function () {
@@ -138,6 +144,37 @@ test("label prefix matches 170 to 177 range", function () {
     assert.deepStrictEqual(prefixIds, ["s170", "s175", "s177"]);
 });
 
+test("instanceId prefix matches without needing the full 10 hex chars", function () {
+    // Confirmed-by-bug case (2026-08-02 picker UI fixes, fix 3): "970fdb"
+    // used to return no match at all -- instanceId was only ever checked
+    // for a full exact hit, and fuzzyHit() doesn't look at it either.
+    var results = rank(ROWS, "970fdb");
+    assert.strictEqual(results.length, 1);
+    assert.strictEqual(results[0].row.spoolId, "s177");
+    assert.strictEqual(results[0].tier, INSTANCE_ID_PREFIX);
+});
+
+test("instanceId prefix ranks below label prefix but above fuzzy", function () {
+    var rows = [
+        { spoolId: "A", label: "99", instanceId: "zzzzzzzzzz", id: "id1", vendor: "V", name: "N", type: "PLA" },
+        { spoolId: "B", label: "1", instanceId: "99aaaaaaaa", id: "id2", vendor: "V", name: "N", type: "PLA" },
+        { spoolId: "C", label: "1", instanceId: "zzzzzzzzzz", id: "id3", vendor: "99 fuzzy vendor", name: "N", type: "PLA" },
+    ];
+    var results = rank(rows, "99");
+    assert.deepStrictEqual(
+        results.map(function (r) {
+            return r.row.spoolId;
+        }),
+        ["A", "B", "C"]
+    );
+    assert.deepStrictEqual(
+        results.map(function (r) {
+            return r.tier;
+        }),
+        [EXACT_LABEL, INSTANCE_ID_PREFIX, FUZZY]
+    );
+});
+
 test("fuzzy matches vendor, name, type, and location", function () {
     assert.strictEqual(rank(ROWS, "polyterra")[0].tier, FUZZY);
     assert.strictEqual(rank(ROWS, "prusament")[0].tier, FUZZY);
@@ -160,29 +197,30 @@ test("fuzzy never shadows a higher tier for the same row", function () {
     );
 });
 
-test("five tier order end to end", function () {
+test("six tier order end to end", function () {
     // A single fixture engineered to hit every tier at once, in the
     // documented order (exact label > exact instanceId > exact _id >
-    // label prefix > fuzzy).
+    // label prefix > instanceId prefix > fuzzy).
     var rows = [
         { spoolId: "A", label: "99", instanceId: "i1", id: "id1", vendor: "V", name: "Fuzzy A", type: "PLA" },
         { spoolId: "B", label: "990", instanceId: "99", id: "id2", vendor: "V", name: "N", type: "PLA" },
         { spoolId: "C", label: "9901", instanceId: "i3", id: "99", vendor: "V", name: "N", type: "PLA" },
         { spoolId: "D", label: "99xyz", instanceId: "i4", id: "id4", vendor: "V", name: "N", type: "PLA" },
-        { spoolId: "E", label: "zzz", instanceId: "i5", id: "id5", vendor: "V zz99 fuzzy", name: "N", type: "PLA" },
+        { spoolId: "E", label: "zzz", instanceId: "99abcdef", id: "id5", vendor: "V", name: "N", type: "PLA" },
+        { spoolId: "F", label: "zzz2", instanceId: "i6", id: "id6", vendor: "V zz99 fuzzy", name: "N", type: "PLA" },
     ];
     var results = rank(rows, "99");
     assert.deepStrictEqual(
         results.map(function (r) {
             return r.row.spoolId;
         }),
-        ["A", "B", "C", "D", "E"]
+        ["A", "B", "C", "D", "E", "F"]
     );
     assert.deepStrictEqual(
         results.map(function (r) {
             return r.tier;
         }),
-        [EXACT_LABEL, EXACT_INSTANCE_ID, EXACT_ID, LABEL_PREFIX, FUZZY]
+        [EXACT_LABEL, EXACT_INSTANCE_ID, EXACT_ID, LABEL_PREFIX, INSTANCE_ID_PREFIX, FUZZY]
     );
 });
 

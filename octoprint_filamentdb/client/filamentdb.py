@@ -2,13 +2,16 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """``requests``-based Filament DB REST client.
 
-OWNS: the three HTTP calls this plugin makes -- ``list_filaments()``
+OWNS: the four HTTP calls this plugin makes -- ``list_filaments()``
     (``GET /api/filaments``, the picker's list projection), ``get_spool()``
     (``GET /api/spools/{spoolId}``, the read for an *assigned* spool --
     filament + spool in one call, variant inheritance already resolved,
-    C-3), and ``get_version()`` (``GET /api/openapi`` -> ``info.version``,
-    the Test Connection probe -- Filament DB has no dedicated health
-    endpoint). Optional bearer auth (C-7), a configurable timeout, and
+    C-3), ``get_locations()`` (``GET /api/locations``, resolves a spool's
+    ``locationId`` to a display name -- C-3b, added 2026-08-02; display
+    only, no location management), and ``get_version()``
+    (``GET /api/openapi`` -> ``info.version``, the Test Connection probe --
+    Filament DB has no dedicated health endpoint). Optional bearer auth
+    (C-7), a configurable timeout, and
     translating every failure mode (connection refused, timeout, HTTP 401,
     any other non-2xx, malformed JSON) into one of the ``FilamentDBError``
     subclasses below -- never a raw ``requests`` exception -- so a
@@ -135,6 +138,17 @@ class FilamentDBClient:
                 f"filamentdb.client: /api/spools/{spool_id} had an unexpected shape"
             )
         return models.parse_spool_detail(raw)
+
+    def get_locations(self):
+        """``GET /api/locations`` -- the full location list, used only to
+        resolve a spool's ``locationId`` to a display name (picker filter
+        dropdown and search, C-3b). Returns ``[Location, ...]``."""
+        raw = self._get("/api/locations")
+        if not isinstance(raw, list):
+            raise InvalidResponse(
+                "filamentdb.client: /api/locations did not return a JSON array"
+            )
+        return [models.parse_location(item) for item in raw]
 
     def get_version(self):
         """``GET /api/openapi`` -> ``info.version`` -- there is no

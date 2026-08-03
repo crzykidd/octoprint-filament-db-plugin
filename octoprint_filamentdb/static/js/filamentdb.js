@@ -15,9 +15,12 @@
 //     (PRD N-1); see that file's docstring.
 // DOES NOT OWN: the search ranking algorithm (filamentdb-search.js), the
 //     weight computation itself (weights.py, server-side only -- this
-//     file only renders the `weightText`/`weightPercent`/`grossText`/
-//     `tareText` fields the API already computed), the picker modal's own
-//     state (filamentdb-picker.js), or any server-side state (api.py,
+//     file only renders the `weightText`/`weightPickerText`/
+//     `weightPercent`/`grossText`/`tareText` fields the API already
+//     computed), resolving locationId -> name beyond the one flattening
+//     pass in loadLibrary() (the `GET /api/locations` read itself lives in
+//     api.py/client/), the picker modal's own state
+//     (filamentdb-picker.js), or any server-side state (api.py,
 //     assignment.py, client/).
 
 $(function () {
@@ -170,6 +173,19 @@ $(function () {
         self.loadLibrary = function () {
             return OctoPrint.simpleApiGet("filamentdb")
                 .done(function (response) {
+                    // locationId -> name (C-3b, added 2026-08-02): resolved
+                    // here, once, and denormalised onto each row below --
+                    // same "flatten so the picker never needs a second
+                    // lookup" pattern the filament fields already follow.
+                    // A location with no entry in this map (unknown/
+                    // missing locationId) resolves to null, which the
+                    // template/search both already treat as "show
+                    // nothing" -- never a raw GUID, never "undefined".
+                    var locationNamesById = {};
+                    (response.locations || []).forEach(function (location) {
+                        locationNamesById[location.id] = location.name;
+                    });
+
                     var rows = [];
                     (response.filaments || []).forEach(function (filament) {
                         (filament.spools || []).forEach(function (spool) {
@@ -183,18 +199,18 @@ $(function () {
                                 name: filament.name,
                                 type: filament.type,
                                 color: filament.color,
-                                // v1 has no /api/locations lookup (out of
-                                // scope -- C-3b's field list carries the
-                                // raw locationId only, not a resolved
-                                // name). The location filter therefore
-                                // filters and displays by id.
-                                locationName: spool.locationId,
+                                locationName: locationNamesById[spool.locationId] || null,
                                 locationId: spool.locationId,
                                 retired: !!spool.retired,
                                 // Weight is computed server-side (C-2,
                                 // weights.py) and arrives ready to render
                                 // -- no client-side arithmetic here.
+                                // weightText is the sidebar's full-ratio
+                                // format; weightPickerText is the picker
+                                // column's own compact "net / gross" format
+                                // (2026-08-02 picker UI fixes, fix 2).
                                 weightText: spool.weightText,
+                                weightPickerText: spool.weightPickerText,
                                 weightPercent: spool.weightPercent,
                                 density: filament.density,
                             });

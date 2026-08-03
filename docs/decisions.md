@@ -6,6 +6,88 @@ reader would otherwise have to re-derive.
 
 ---
 
+## 2026-08-02 — Picker UI fixes: a new `weights.py` field instead of client-side math, a table
+class-selector scheme that survives a conditional column, and where the duplicate-assignment
+badge had to move
+
+`prompts/2026-08-02-picker-ui-fixes.md`. Five independent fixes to the picker (widen the modal +
+overflow guard, a compact "net / gross" weight column, an `instanceId`-prefix search tier, hiding
+the Match column when not searching, and resolving `locationId` to a name). Five things worth
+recording that the prompt didn't spell out:
+
+**1. The picker's "169.4 / 359.4 g" format is a new `WeightDisplay.picker_text` field in
+`weights.py`, not a client-side reformat of `weightText`.** `weightText`'s "169.4 g / 1000 g"
+already had the two numbers needed, and reformatting them in JS would have been the smaller diff.
+Rejected because it reintroduces exactly the "weight arithmetic/formatting duplicated in two
+languages" problem the prerequisite dedupe task just eliminated (docs/decisions.md, same date,
+"server-owns-weights") — `_trim()`/`_fixed1()`'s rounding rules would need a second, hand-synced
+implementation in JS to reformat correctly. `picker_text` is computed alongside `text` in
+`compute_weight()`, serialized as `weightPickerText` (`api.py`'s `_serialize_spool`), and consumed
+by the picker only — the sidebar keeps using `weightText` unchanged, per the prompt's explicit
+"picker-only" scope note. One consequence worth flagging: `picker_text`'s nominal-missing branch
+differs from `text`'s — the sidebar's degraded text for a missing nominal is a bare net figure
+("624.0 g", no gross, matching §Weight display's spec table verbatim), but the picker's scale
+figure never needed a nominal in the first place (only gross and tare), so `picker_text` renders
+"624.0 / 814 g" in that same case rather than degrading further. Both are intentional per-column
+behaviour, not an inconsistency — confirmed live via a `zzz-*` nominal-missing spool.
+
+**2. The Match column's conditional presence forced a class-based column-width scheme, not
+`nth-child`.** Fix 1 (widen + ellipsis-clip the Filament column) needs `table-layout: fixed` with
+explicit widths on every other column so the Filament column alone absorbs remaining space. Fix 4
+makes the Match `<th>`/`<td>` pair conditionally rendered (`ko if: pickerSearching`). Since CSS
+column widths in a fixed-layout table come from the first row's cells, and `nth-child` position
+shifts when Match disappears, positional selectors would silently target the wrong column in one
+of the two states. Solved with explicit `filamentdb-col-*` classes on every `<th>` instead —
+stable regardless of how many columns are actually rendered.
+
+**3. The duplicate-assignment ("already on Tool N") badge moved out of the Match column into the
+Label column.** It used to share the Match `<td>` with the tier label. Hiding the whole Match
+column when not searching (fix 4) would have silently hidden the duplicate-assignment warning too
+while browsing without a query — a real regression of an existing FR-2 feature that has nothing to
+do with search relevance. Moved the badge next to the spool label/instanceId instead, where it's
+now visible in both states; verified live that `#47` still shows "already on Tool" with an empty
+search box.
+
+**4. A location-fetch failure degrades to an empty list, not a 502 for the whole picker GET.**
+`GET /api/locations` is additive display-only data (C-3b); the filament list is the endpoint's
+essential payload per the existing cache docstring's "leave a previously-cached value intact"
+philosophy for `list_filaments()`. Applied the same tolerance one level up: `on_api_get()` and
+`_handle_refresh()` catch a `FilamentDBError` from `get_locations()` separately from the filaments
+fetch, log a warning, and continue with `locations=[]` — `locationName` then resolves to `null`
+for every row via the existing "unknown locationId shows nothing" rule, rather than blanking the
+whole picker over a display-only endpoint being briefly unreachable.
+
+**5. `client/cache.py`'s `FilamentCache` grew a second cached entry (`get_locations()`) via a
+small shared `_get_cached(key, fetch_fn, ...)` helper, not a duplicate TTL implementation or a new
+`LocationCache` class.** The prompt says to cache locations "alongside the filament list", which
+reads as one cache instance's lifetime, not a second object api.py has to also own and pass around.
+Genericized the existing get()'s body into a keyed helper (`self._entries[key] = {value,
+fetched_monotonic}`) rather than copy-pasting the ~15-line TTL/lock dance a second time.
+
+**6. No location display was added to the sidebar or to any picker row's tooltip beyond the
+title="full filament line" overflow guard from fix 1.** The prompt's fix 5 says "resolve locationId
+→ name everywhere a location is shown — the filter dropdown and the row/tooltip." Audited every
+current location-related surface first: the sidebar has never displayed location at all (its hover
+tooltip only ever showed gross/tare), and the picker row itself has no location column — location
+only ever existed as the filter dropdown's value and as `fuzzyHit()`'s (previously unpopulated)
+`locationName` field. Read "the row/tooltip" as covering those two real surfaces (the filter
+dropdown, now names; `row.locationName`, now populated so fuzzy search actually matches location
+text) rather than as a mandate to add a wholly new location display that didn't exist before this
+fix. `row.locationName` is populated in `filamentdb.js`'s `loadLibrary()` regardless, so a future
+tooltip addition costs nothing extra.
+
+**7. Four `zzz-*` filaments (not one filament with four spools) for the degraded-path
+verification**, because tare (`spoolWeight`) and nominal (`netFilamentWeight`) are filament-level
+fields, not spool-level — Filament DB's inheritance model (C-4) makes a single filament unable to
+represent "tare missing" and "nominal missing" simultaneously across different spools. Created via
+direct `POST /api/filaments` + `POST /api/filaments/{id}/spools` calls (curl, no plugin create-flow
+exists), verified rendering live in the picker (`not weighed`, `1042 g gross · tare not set`,
+`624.0 / 814 g`, `1100.0 / 1290 g` for the overfilled case), then deleted via `DELETE
+/api/filaments/{id}` each (soft delete to trash, same as the prerequisite session's convention) —
+confirmed the live list count returned to 63.
+
+---
+
 ## 2026-08-02 — Deduped weights/search: server-owns-weights vs. JS-owns-search, and how the
 weight annotation reaches every frontend read path
 

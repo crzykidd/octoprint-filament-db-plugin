@@ -166,6 +166,12 @@ not use.
 | `color` | picker + sidebar swatch |
 | `spools[]` → `_id`, `label`, `totalWeight`, `retired`, `locationId` | picker, assignment, commit |
 
+**Plus, beyond the filament document itself:** `GET /api/locations` → `_id`, `name` (2026-08-02
+picker UI fixes, fix 5) — resolves a spool's `locationId` to a display name for the picker's
+location filter and search, since the raw GUID is meaningless to a user and `fuzzyHit()`'s location
+tier needs an actual name to match against. Display only — the plugin does not sync, edit, or
+otherwise manage locations.
+
 Net remaining and tare are **never computed locally** — `GET /api/filaments/:id/spool-check` does
 that server-side (FR-4). Everything else on the document — cost, temperatures, calibrations,
 presets, drying, mechanical properties, stock thresholds — belongs to Filament DB and is none of
@@ -700,7 +706,11 @@ user pick a search mode, one field ranks:
 2. **exact `instanceId`** — a scanned or pasted tag id
 3. **exact `_id`** — pasted from a Filament DB URL
 4. **`label` prefix** — `17` → 170–177
-5. **fuzzy** over vendor / name / type / colour name / location
+5. **`instanceId` prefix** — `970fdb` → the spool whose full id is `970fdbcd56`. Nobody types all
+   ten hex characters, so without this tier the identifier was effectively unsearchable — only a
+   full exact match (#2) or an incidental fuzzy substring hit elsewhere on the row would surface
+   it. Ranked above fuzzy (#6): a hex prefix is a deliberate identifier search, not incidental text.
+6. **fuzzy** over vendor / name / type / colour name / location
 
 Each row shows **why** it matched, so a fuzzy hit is never mistaken for an exact one. This mirrors
 what `filament-bridge`'s mobile lookup learned in practice: numeric lookup is the common case, text

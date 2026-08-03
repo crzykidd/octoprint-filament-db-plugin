@@ -4,7 +4,11 @@
 clear, test connection, force refresh.
 
 OWNS: the ``SimpleApiPlugin`` surface at ``/api/plugin/filamentdb`` -- GET
-    returns the cached, flattened spool library plus current assignments
+    returns the cached, flattened spool library, the location list (added
+    2026-08-02, C-3b -- resolves a spool's ``locationId`` to a display
+    name; a location-fetch failure logs and degrades to an empty list
+    rather than failing the whole GET, since it's display-only and the
+    filament library is the essential payload) plus current assignments
     (search itself runs client-side over this, FR-2); POST commands
     ``assign``, ``clear``, ``test_connection``, ``refresh``. Permission
     enforcement per FR-10: ``FILAMENTDB_SELECT`` to view/assign/clear/
@@ -18,7 +22,9 @@ DOES NOT OWN: the HTTP client itself (``client/filamentdb.py``), the
     never writes settings directly, and that module does its own weight
     annotation on everything it returns), or weight arithmetic
     (``weights.py`` -- called here only to annotate each spool in the
-    library listing and the assign response, not stored).
+    library listing (both the sidebar's ``weightText`` and the picker's
+    own compact ``weightPickerText``) and the assign response, not
+    stored).
 """
 
 import flask
@@ -33,9 +39,9 @@ from .client.filamentdb import FilamentDBClient, FilamentDBError
 
 def _serialize_spool(spool, filament):
     # Each spool is decorated with its computed weight here -- the picker
-    # (the list/search endpoint's consumer) renders `weightText` directly
-    # rather than recomputing client-side (C-2; weights.py is the sole
-    # implementation, see its module docstring).
+    # (the list/search endpoint's consumer) renders `weightText`/
+    # `weightPickerText` directly rather than recomputing client-side (C-2;
+    # weights.py is the sole implementation, see its module docstring).
     weight = weights.compute_weight(
         spool.total_weight, filament.spool_weight, filament.net_filament_weight
     )
@@ -48,7 +54,15 @@ def _serialize_spool(spool, filament):
         "locationId": spool.location_id,
         "weightText": weight.text,
         "weightPercent": weight.percent,
+        # The picker column's own compact format ("169.4 / 359.4 g", no
+        # nominal) -- see weights.py's WeightDisplay.picker_text docstring.
+        # The sidebar keeps using weightText unchanged.
+        "weightPickerText": weight.picker_text,
     }
+
+
+def _serialize_location(location):
+    return {"id": location.id, "name": location.name}
 
 
 def _serialize_filament(filament):
@@ -117,16 +131,24 @@ class FilamentDBApiMixin(SimpleApiPlugin):
     def on_api_get(self, request):
         if not Permissions.PLUGIN_FILAMENTDB_SELECT.can():
             flask.abort(403)
+        ttl = self._settings.get_int([settings_keys.CACHE_TTL_SECONDS])
         try:
-            filaments = self._filament_cache().get(
-                self._client(),
-                self._settings.get_int([settings_keys.CACHE_TTL_SECONDS]),
-            )
+            filaments = self._filament_cache().get(self._client(), ttl)
         except FilamentDBError as exc:
             self._logger.warning("api.py: list_filaments failed: %s", exc)
             return flask.jsonify(error=str(exc)), 502
+        try:
+            locations = self._filament_cache().get_locations(self._client(), ttl)
+        except FilamentDBError as exc:
+            # Display-only (C-3b) -- unlike the filament list above, a
+            # failure here must not blank the whole picker. Degrade to no
+            # names; locationId -> name resolution just falls back to
+            # showing nothing (never a raw GUID, never "undefined").
+            self._logger.warning("api.py: get_locations failed: %s", exc)
+            locations = []
         return flask.jsonify(
             filaments=[_serialize_filament(f) for f in filaments],
+            locations=[_serialize_location(loc) for loc in locations],
             selectedSpools=self._assignment_store().all(),
         )
 
@@ -157,15 +179,20 @@ class FilamentDBApiMixin(SimpleApiPlugin):
         return flask.jsonify(connected=True, version=version)
 
     def _handle_refresh(self):
+        ttl = self._settings.get_int([settings_keys.CACHE_TTL_SECONDS])
+        client = self._client()
         try:
-            self._filament_cache().get(
-                self._client(),
-                self._settings.get_int([settings_keys.CACHE_TTL_SECONDS]),
-                force_refresh=True,
-            )
+            self._filament_cache().get(client, ttl, force_refresh=True)
         except FilamentDBError as exc:
             self._logger.warning("api.py: refresh failed: %s", exc)
             return flask.jsonify(error=str(exc)), 502
+        try:
+            # Locations are cached "alongside the filament list" (C-3b) --
+            # a manual refresh refreshes both, but a locations-only failure
+            # still isn't fatal to the refresh action itself.
+            self._filament_cache().get_locations(client, ttl, force_refresh=True)
+        except FilamentDBError as exc:
+            self._logger.warning("api.py: refresh (locations) failed: %s", exc)
         return flask.jsonify(success=True)
 
     def _handle_assign(self, data):

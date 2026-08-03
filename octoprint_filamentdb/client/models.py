@@ -5,13 +5,15 @@
 OWNS: ``SpoolSummary``/``FilamentSummary`` (the ``GET /api/filaments`` list
     projection -- ``diameter`` absent, C-4), ``FilamentDetail``/``SpoolDetail``
     (the ``GET /api/spools/{spoolId}`` detail projection -- variant
-    inheritance already resolved server-side, ``diameter`` present), and the
-    ``parse_*`` functions that turn raw JSON dicts into them. Fields are
-    exactly PRD C-3b's seven plus the two weight fields C-2's net
-    computation needs (``spoolWeight``, ``netFilamentWeight`` -- see
-    docs/decisions.md: C-3b's field count predates the Weight display
-    section and is a floor, not a ceiling). Nothing else on either
-    document is read.
+    inheritance already resolved server-side, ``diameter`` present),
+    ``Location`` (the ``GET /api/locations`` projection -- ``_id``/``name``
+    only, added 2026-08-02 to resolve a spool's ``locationId`` to a display
+    name; see C-3b), and the ``parse_*`` functions that turn raw JSON dicts
+    into them. Fields are exactly PRD C-3b's seven plus the two weight
+    fields C-2's net computation needs (``spoolWeight``,
+    ``netFilamentWeight`` -- see docs/decisions.md: C-3b's field count
+    predates the Weight display section and is a floor, not a ceiling).
+    Nothing else on any of these documents is read.
 DOES NOT OWN: the HTTP calls themselves (``client/filamentdb.py``), TTL
     caching (``client/cache.py``), or any weight arithmetic (``weights.py``
     -- these are plain data carriers only).
@@ -76,6 +78,17 @@ class FilamentDetail:
 
 
 @dataclass(frozen=True)
+class Location:
+    """A location document from ``GET /api/locations`` -- used only to
+    resolve a spool's ``locationId`` to a display name (picker filter
+    dropdown and search, C-3b). Nothing else on the document (address,
+    notes, ...) is read; this plugin does no location management."""
+
+    id: str
+    name: str
+
+
+@dataclass(frozen=True)
 class SpoolDetail:
     """``GET /api/spools/{spoolId}``'s ``{filament, spool}`` shape -- the
     read for an assigned spool (C-3): one request returns everything the
@@ -133,3 +146,7 @@ def parse_spool_detail(raw):
         filament=parse_filament_detail(raw["filament"]),
         spool=parse_spool_summary(raw["spool"]),
     )
+
+
+def parse_location(raw):
+    return Location(id=raw["_id"], name=raw.get("name") or "")
