@@ -67,8 +67,12 @@ Re-derived by more than one session already; internalize them before touching co
 - Check `git status --porcelain` before editing; if the user is mid-edit on a file the plan
   touches, list it and ask.
 - **Work on `dev`. `main` is protected** — PRs only, force-push and deletion blocked, and
-  `enforce_admins: true` so even the owner cannot push directly. Changes reach `main` via a
-  `dev → main` PR. Conventional-commit prefixes (`feat:`/`fix:`/`chore:`/`docs:`).
+  `enforce_admins: true` so even the owner cannot push directly. Conventional-commit prefixes
+  (`feat:`/`fix:`/`chore:`/`docs:`).
+- **🚦 NEVER merge to `main`. It is the user's release gate** — reached deliberately via
+  `/release-prep` and `/release-cut`, not as end-of-session tidying. **"Push" never means "merge".**
+  Opening a PR — even when asked to — is **not** permission to merge it; that needs its own explicit
+  yes. See the rule block in `CLAUDE.md`; this has been violated once already.
 - **Never put anything in `private_data/`** expecting it to be committed — the whole directory is
   gitignored. Committed test data goes in `tests/fixtures/`.
 

@@ -39,6 +39,36 @@ cited* to understand a problem, but **never copied** — not its odometer, not O
 `gcodeInterpreter`, not any other plugin's source. Licences are compatible; this is a deliberate
 engineering choice, recorded in `docs/decisions.md`. New source files carry an AGPLv3 header.
 
+## 🚦 Merging to `main` is the user's gate — NEVER merge
+
+**This is a hard rule with no exceptions, and it has already been violated once.**
+
+`main` is not a branch you write to. It is a **release gate the user controls**, and reaching it is
+a deliberate process run through `/release-prep` and `/release-cut` — not a tidy-up step at the end
+of a work session.
+
+| You may | You may NOT |
+|---|---|
+| commit on `dev` (after asking) | merge **any** PR, ever |
+| `git push origin dev` (when asked) | run `gh pr merge` |
+| open a PR **if explicitly asked to** | merge a PR you were asked to *open* |
+| — | push to `main` (protection blocks it anyway) |
+| — | tag a release, or publish one |
+
+**"Push" NEVER means "merge".** They are different requests. If the user says *push*, push the
+branch and stop. If they want `main` updated they will say so, and even then: **opening a PR is not
+permission to merge it.** Ask, and wait for an explicit yes on the merge itself.
+
+**How this went wrong (2026-08-02, PR #2):** the user said *"push these commits to github"*. Every
+commit was already on `origin/dev`, so the only thing left to "push" looked like the `dev → main`
+PR. The session announced it would open **and merge** the PR, the user's next message was about an
+unrelated topic, and the merge was treated as approved. **Silence is not consent, and neither is an
+unchallenged plan.** The correct action was: push `dev`, then say `main` is N commits behind and ask
+whether to open a PR.
+
+Note that PR #1 *was* legitimate — the user said *"let's PR dev to main and merge it"*. That is what
+explicit permission looks like. Match that bar.
+
 ## Task → file routing
 
 **Read only what the task needs.** The layering (PRD rule N-3) guarantees these lists are
