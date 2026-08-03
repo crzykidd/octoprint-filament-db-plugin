@@ -6,6 +6,54 @@ reader would otherwise have to re-derive.
 
 ---
 
+## 2026-08-02 — CI + CodeQL: the Python 3.9 floor is real, ruff's *defaults* drift across
+versions independent of the version pin, and `octoscanner` needs its own repo checked out
+
+`prompts/2026-08-02-ci-and-codeql.md`. Four non-obvious findings from wiring `.github/workflows/`:
+
+**1. The declared `requires-python = ">=3.9"` floor was never actually true until this task
+verified it, and it turns out to be true.** Every test had run on the container's Python 3.10;
+nothing had ever run the suite on 3.9. Verified directly (not just via the eventual CI run) by
+running `pytest` for both 3.9 and 3.13 inside `python:3.9-slim` / `python:3.13-slim` containers
+against the real source tree before touching CI at all: **46/46 pass on both.** No `match`
+statement, no bare `X | Y` union outside a string annotation, nothing else 3.9 can't parse. The
+`Test` job in `ci.yml` now runs this as a matrix (`Test (Python 3.9)` / `Test (Python 3.13)`) so
+it stays true rather than reverting to an unverified claim.
+
+**2. Ruff's *default enabled rule set* — not just its version number — changed between 0.8.4
+(this repo's prior ad hoc baseline) and 0.16.1.** Pinning the CI version alone (the filament-bridge
+precedent) is necessary but not sufficient: running 0.16.1 with no `pyproject.toml` config against
+the unchanged tree surfaced 22 new findings (`SIM102`, `PLW1510`, …) that 0.8.4's defaults never
+checked. Fix was two-layered — `pyproject.toml` now pins `[tool.ruff.lint] select = ["E4", "E7",
+"E9", "F"]` explicitly (0.8.4's actual default, frozen), *and* CI pins `ruff==0.16.1`. Either alone
+would eventually drift; together, a future version bump is a deliberate, visible change to
+`select`, not a silent one. `ruff format`'s output also disagreed between the two versions on one
+file's line-wrapping (unrelated to `select`, which doesn't govern the formatter) — reformatted the
+one file under 0.16.1 (the version CI now pins) rather than 0.8.4, and did not touch anything else.
+
+**3. `octoscanner` cannot be used via a plain `pip install git+...`; it needs its own repo checked
+out at scan time.** Its `RULES_DIR = Path("rules")` (`src/octoscanner/__init__.py`) resolves
+relative to the process's current working directory, not the installed package location — the
+`rules/` directory at the tool's repo root is never packaged into the wheel/sdist at all. A bare
+`pip install` + `octoscanner scan` fails with `Rules directory not found: rules`. The `octoscanner`
+job in `ci.yml` therefore checks out `jacopotediosi/octoscanner` to a second path
+(`actions/checkout` with `repository:`), installs from that checkout, and runs `octoscanner scan`
+with that checkout as the working directory, pointing at the plugin checkout by relative path.
+Confirmed working end-to-end locally first (venv + local clone) before writing the job. Live run
+against `octoprint_filamentdb/` found one pre-existing, genuine, non-blocking finding (`SEC-0011`:
+`static/js/filamentdb-picker.js:211`'s `PNotify` call doesn't set `text_escape: true`) — left
+unfixed, since this task's scope is CI wiring, not fixing what CI finds; flagging here so it isn't
+mistaken for noise.
+
+**4. Repo is public, so CodeQL/code scanning needed no manual enabling.** GitHub Advanced Security
+(including code scanning result upload) is free and on by default for public repositories;
+`security_and_analysis` on the repo has no `advanced_security` toggle at all (that field only
+exists for private repos), and Actions are already enabled with `allowed_actions: all`. No repo
+settings change was made or was necessary — `codeql.yml`'s own push to `dev`... actually doesn't
+run it (see the trigger design below); its first real run is on `dev`'s push-triggered `ci.yml` plus
+whatever the branch's next `main`-bound event is. See the CI run report in the handoff for how it
+was actually verified.
+
 ## 2026-08-02 — Merging to `main` is the user's gate; the session merged without permission
 
 **A process violation, recorded because the rule was implicit and is now explicit.**

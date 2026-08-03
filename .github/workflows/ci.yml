@@ -1,0 +1,142 @@
+name: CI
+
+on:
+  # Push-only (no pull_request). Every dev push gets the full CI feedback, and the
+  # dev→main PR's required checks are satisfied by the head commit's push run
+  # (branch protection is non-strict). Triggering on both push AND pull_request
+  # produced duplicate same-named check runs that left required checks stuck at
+  # "Expected — Waiting for status to be reported" in a sibling project, forcing a
+  # manual merge bypass. Do not add `pull_request:` here — see
+  # docs/decisions.md and codeql.yml's trigger comment for the same failure mode.
+  push:
+    branches: [dev, main]
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      # Pin ruff so CI matches what developers run locally. An unpinned
+      # `pip install ruff` pulls whatever is newest, and a release that
+      # broadens ruff's *default* enabled rule set turns Lint red on
+      # unchanged code (confirmed while wiring this job: ruff 0.16.1's
+      # defaults flag SIM/PLW findings that 0.8.4 -- this repo's baseline --
+      # does not). `pyproject.toml`'s `[tool.ruff.lint] select` pins the
+      # rule set explicitly for the same reason, belt-and-braces: a
+      # deliberate version bump here should never silently change what
+      # passes.
+      - run: pip install ruff==0.16.1
+      - run: ruff check octoprint_filamentdb/ tests/
+      # Check only -- never auto-format the tree in CI. `ruff format` (no
+      # --check) rewrites files; that has no business happening in a CI run.
+      - run: ruff format --check octoprint_filamentdb/ tests/
+
+  test:
+    # Runs as a Python 3.9 / 3.13 matrix. pyproject.toml declares
+    # `requires-python = ">=3.9"`, but historically every test ran on
+    # whatever Python happened to be on the dev machine (3.10) -- so the
+    # floor the package advertises had never actually been verified. 3.13
+    # is the current stable ceiling. Both must pass; if 3.9 ever fails here,
+    # that is a real finding (the declared floor is wrong) and gets fixed by
+    # either raising `requires-python` deliberately or fixing the
+    # incompatibility -- never by quietly dropping the matrix entry.
+    name: Test (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.13"]
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # tests/test_search_ranking_js.py shells out to `node` to run the only
+      # coverage that exists for static/js/filamentdb-search.js (the
+      # picker's actual runtime search ranking -- FR-2). That test is
+      # written to FAIL, not skip, if `node` is missing, precisely so a
+      # misconfigured runner can't silently stop covering it. This step is
+      # what keeps it from failing here.
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+
+      - run: pip install -e ".[dev]"
+      - run: pytest
+
+  package-build:
+    # The real release artifact for a plugin: it ships to the OctoPrint
+    # Plugin Repository as a package, not as a container image (see
+    # "Not adding" below for why there's no image-build job here).
+    name: Package build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: pip install build twine
+      - run: python -m build
+      - run: twine check dist/*
+
+  compose-validate:
+    name: Compose validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: docker compose -f docker-compose.dev.yml config --quiet
+
+  octoscanner:
+    # OctoPrint 2.0 deprecation/security scan (docs/prd.md "CI" +
+    # docs/decisions.md). Genuinely valuable -- its whole job is catching
+    # 1.x APIs a 2.0-only plugin must not use -- but octoscanner is
+    # early-development software with a rule set that changes upstream on
+    # its own schedule. Never make it a required check: it must be able to
+    # inform without being able to break `main` when its rules change.
+    # continue-on-error is used deliberately over a job-level `if:` -- see
+    # the CI-trigger and required-check notes above; this job isn't a
+    # required check candidate at all, so there's no "must always run"
+    # constraint to preserve, just "must never fail the workflow".
+    name: OctoPrint 2.0 scan
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          path: plugin
+
+      # octoscanner's rules/ directory ships in its own repo, not in the
+      # PyPI-less package install -- `RULES_DIR` is resolved relative to
+      # the process's cwd, not the installed package, so the scan has to
+      # run from inside a checkout of the tool itself.
+      - uses: actions/checkout@v5
+        with:
+          repository: jacopotediosi/octoscanner
+          path: octoscanner-src
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - run: pip install ./octoscanner-src
+      - name: Scan for OctoPrint 2.0 deprecations
+        working-directory: octoscanner-src
+        run: octoscanner scan ../plugin/octoprint_filamentdb
+
+  # Not adding:
+  # - mypy: the codebase has no broad type annotations yet; enabling it now
+  #   would be pure noise.
+  # - dependency scanning: essentially two runtime dependencies
+  #   (OctoPrint, requests); CodeQL (codeql.yml) covers code-level security.
+  # - Migration check: no Alembic / DB migrations in this project.
+  # - Image build: this project ships a plugin package, not a container
+  #   image. Dockerfile.dev builds a *development* environment only and is
+  #   never published.

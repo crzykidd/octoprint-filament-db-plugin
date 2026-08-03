@@ -1,5 +1,8 @@
 # octoprint-filament-db-plugin
 
+[![CI](https://github.com/crzykidd/octoprint-filament-db-plugin/actions/workflows/ci.yml/badge.svg)](https://github.com/crzykidd/octoprint-filament-db-plugin/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/crzykidd/octoprint-filament-db-plugin/actions/workflows/codeql.yml/badge.svg)](https://github.com/crzykidd/octoprint-filament-db-plugin/actions/workflows/codeql.yml)
+
 An [OctoPrint](https://octoprint.org/) plugin that tracks filament usage directly in
 [Filament DB](https://github.com/hyiger/filament-db).
 

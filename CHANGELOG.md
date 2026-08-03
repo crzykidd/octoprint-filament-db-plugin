@@ -20,6 +20,10 @@ release will be the one that closes the loop (FR-7, `POST /api/print-history`).
 
 ### Added
 
+- **CI + CodeQL** — `.github/workflows/ci.yml` (Lint, Test on a Python 3.9/3.13 matrix, Package
+  build, Compose validation, a non-blocking OctoPrint 2.0 deprecation scan) and `codeql.yml`
+  (Python + JS, `security-extended`) now run on every push to `dev`/`main`. Infrastructure only —
+  no behaviour change.
 - **Plugin skeleton** — installable on OctoPrint 2.0 (`pyproject.toml`, not `setup.py`), with
   settings, two explicit permissions (`FILAMENTDB_SELECT` / `FILAMENTDB_ADMIN`), and sidebar +
   settings panels.

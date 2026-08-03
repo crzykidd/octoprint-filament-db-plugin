@@ -204,9 +204,7 @@ class FilamentDBApiMixin(SimpleApiPlugin):
         try:
             detail = self._client().get_spool(spool_id)
         except FilamentDBError as exc:
-            self._logger.warning(
-                "api.py: get_spool(%s) failed: %s", spool_id, exc
-            )
+            self._logger.warning("api.py: get_spool(%s) failed: %s", spool_id, exc)
             return flask.jsonify(error=str(exc)), 502
 
         already_assigned_to = self._assignment_store().find_tool_for_spool(spool_id)

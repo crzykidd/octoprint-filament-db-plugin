@@ -55,3 +55,17 @@ octoprint_filamentdb = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+# CI pins the ruff *version* (.github/workflows/ci.yml) so an unpinned `pip install
+# ruff` doesn't pull whatever is newest; that alone isn't enough, because ruff's
+# *default* enabled rule set has itself grown across versions -- checked ruff 0.8.4
+# (this repo's baseline) against 0.16.1 and the newer default alone adds SIM/PLW/YTT
+# findings on unchanged code. Pinning `select` explicitly here means a future,
+# deliberate version bump can't silently widen what Lint checks the way an unpinned
+# install could -- see the Lint job comment in ci.yml for the filament-bridge
+# incident this mirrors.
+[tool.ruff]
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
