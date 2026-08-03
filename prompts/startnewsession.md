@@ -85,54 +85,58 @@ Re-derived by more than one session already; internalize them before touching co
 - Log non-obvious calls (approach changes, rejected alternatives, workarounds) in
   `docs/decisions.md`, newest at top.
 
-## ⏸️ PICK UP HERE (2026-08-01 — design complete, no code yet)
+## ⏸️ PICK UP HERE (2026-08-02 — phase 1, three implementation steps landed)
 
-**Status: pre-alpha. PRD written and reviewed. Zero application code.**
+**Status: pre-alpha, working plugin.** It installs on OctoPrint 2.0, meters extrusion live, and
+assigns Filament DB spools to tools. It does **not** yet write anything back to Filament DB.
 
-Nothing is in flight. The design is settled and the repo scaffolding is in place:
-`docs/prd.md`, `docs/decisions.md`, `standards.md`, `CLAUDE.md`, `prompts/TEMPLATE.md`,
-`.claude/commands/release-{prep,cut}.md`.
+**Done:**
 
-**Not yet done — likely next steps, in dependency order:**
+| Step | What landed |
+|---|---|
+| Design | PRD complete, Q-1…Q-9 all resolved, decision log current |
+| 1. Skeleton | packaging, mixins, settings, permissions, empty panels |
+| 2. Live mm readout | `metering/odometer.py` + sidebar. **Verified exact** against a real PrusaSlicer file — 2667.31 mm from both the odometer and an independent regex sum |
+| 3. Client + picker | FDB client, TTL cache, ranked search, filters, assignment, sidebar with computed net weights |
+| Cleanup | weights deduped server-side; search deduped to JS with a Node test that provably fails when the JS breaks |
+| UI fixes | six-tier search (instanceId prefix), location names, Match column, widened modal, `Remaining / Scale` weights |
 
-**Testing is staged — one new variable per phase. We are on phase 1.**
-**1.** clean OctoPrint 2.0, **no third-party plugins**, **single-extruder** virtual printer — prove
-the core loop end to end. **2.** real single-tool hardware. **3.** MMU (`mmu5` profile, then the real
-Core One + MMU). **4.** plugin coexistence (`Octoprint-PrusaMMU`). Most documented risk is phase 3+;
-don't let it complicate phase 1. Do not install other plugins in the dev instance yet.
+**Next — resume the implementation order at step 4:**
 
-1. **Bring up the dev environment and confirm it works.**
-   `docker compose -f docker-compose.dev.yml up -d --build` → http://localhost:5000. The compose
-   and `Dockerfile.dev` are written but **have never been run** — verify the 2.0 RC upgrade
-   actually takes (the Dockerfile asserts it), then walk the wizard and enable the virtual
-   printer. This also answers **Q-3**.
-2. ~~Resolve the open questions.~~ **Done — Q-1…Q-8 are all answered** (2026-08-01), see the Open
-   questions table in `docs/prd.md`. Two changed requirements: `M600` is **not** in OctoPrint's
-   default `pausingCommands`, so a filament change does not pause the print at all; and `spoolId`
-   is optional on `POST /api/print-history`, which is exactly why it must always be sent.
-3. **Formally adopt `code-checkin-and-pr @ 1.2.0`** once CI exists. The branch rule is already
-   implemented (`dev` + protected `main`); the CI checks are what's missing.
-4. **Seed a null-density ROOT filament in the dev Filament DB** before trusting FR-6. The instance
-   is now 45 filaments / 36 spools (33 variants — good parent/variant coverage), but nothing
-   exercises the density fallback: a null-density *variant* inherits from its parent, so only a
-   root filament with `density: null` reaches that branch. Dev FDB is
-   `http://crzydev.home.arpa:3000`, writable, unauthenticated; clean up `zzz-*` records you create.
-5. **Then implement UI-first, not bottom-up.** Deliberate change — without a UI the odometer is a
-   black box that unit tests cannot fully validate (see `docs/decisions.md`, 2026-08-02). Order:
-   1. **plugin skeleton** — loads clean on OctoPrint 2.0, settings, permissions, sidebar shell
-   2. **live raw-millimetre readout** — the debug instrument. **Zero dependencies:** no Filament DB,
-      no spool selection, no density. Just hook → accumulate → display.
-   3. `metering/odometer.py` — now directly observable, and checkable against the slicer's
-      `filament used [mm]` (the FR-5 acceptance bar)
-   4. `metering/convert.py` → `metering/gcode_meta.py` → `client/filamentdb.py` → spool picker
-   5. `journal.py` → `retry.py` → `job.py` → commit path
-   6. pre-print confirmation dialog → FR-9b history/failure report
+1. **`metering/convert.py`** — mm→grams (FR-6). The odometer already produces trustworthy
+   millimetres; this turns them into grams using each spool's `diameter` and `density`, with the
+   fallback chain and the "estimated" disclosure. **Seed a null-density ROOT filament first** — a
+   null-density *variant* inherits and never reaches the fallback (C-4), so that branch is
+   otherwise untestable.
+2. **`metering/gcode_meta.py`** — parse the slicer config block (FR-4 inputs).
+3. **`journal.py` + `retry.py`** — the durable write journal (FR-9/FR-9b). **This unblocks FR-2's
+   real default sort**, which is "most recently used on this printer" and currently falls back to
+   label ascending with a `TODO(FR-9b)`.
+4. **`job.py` commit path** — `POST /api/print-history` (FR-7). **The point of the whole project.**
+   Re-read **C-1** first: that endpoint debits spool weight itself, so never also call the
+   per-spool usage endpoint.
+5. **Pre-print confirmation dialog** (FR-4) and the **FR-9b history/failure UI**.
+
+**Known open items:**
+
+- **Resend double-count** (FR-5): a resent command re-fires `gcode.sent` and is counted twice.
+  Measured at +0.79 mm on 2667 mm (0.03%). Resends skip the `queuing` phase entirely — that
+  asymmetry is the candidate fix. Matters more once FR-6 carries it into grams.
+- **`jobLabel` vs `notes`** for the print outcome: settled on status-first in `notes`, since
+  Filament DB has no `status` field. Worth asking the author for `status` + `endedAt`.
+- **`code-checkin-and-pr @ 1.2.0`** not formally adopted — the branch rule is implemented
+  (`dev` + protected `main`), the CI checks are what's missing.
+- Node 12 in the dev image (Debian apt). Fine for the dependency-free test script; pin newer if
+  the JS tests ever need modern syntax.
 
 ## Current state (update as it moves)
 
-- **Releases:** none. No version file, no `CHANGELOG.md`, no CI yet.
-- **Open issues:** none filed — no GitHub repo yet.
-- **Upstream asks queued** (file once the repo exists, see `docs/prd.md`):
+- **Releases:** none. Version is `0.0.1` in `octoprint_filamentdb/_version.py` (bare, no `v`) and
+  `CHANGELOG.md` exists with everything landed under `[Unreleased]`. **No CI yet** — that is the
+  remaining gap before `release-prep-and-cut` is fully adopted. The first release should be the one
+  that closes the loop (FR-7); there is nothing worth cutting before then.
+- **Open issues:** none filed. Repo is `crzykidd/octoprint-filament-db-plugin` (public).
+- **Upstream asks queued** (not yet filed, see `docs/prd.md`):
   1. `hyiger/filament-db` — add `"octoprint"` to the print-history `source` enum (v1 sends
      `"other"` as a workaround).
   2. `hyiger/filament-db` — idempotency key on `POST /api/print-history`, so a retry after an
@@ -156,10 +160,11 @@ don't let it complicate phase 1. Do not install other plugins in the dev instanc
   never reaches `gcode.sent` — so the odometer can miss a tool change. The virtual printer cannot
   reproduce this. Until it's tested, treat per-tool attribution on MMU as unproven; the *total*
   is not at risk.
-- **Dev dependencies:** the Filament DB dev instance from the `filament-bridge` work is reused
-  as-is (200+ spools, variants, retired spools, null-density records — better test data than
-  anything seeded). The dev compose file joins its network rather than standing up a second
-  instance.
+- **Dev Filament DB:** `http://crzydev.home.arpa:3000`, unauthenticated, **reachable from inside
+  the dev container**, ~63 filaments / 36 spools with real variants and locations. It is a
+  **throwaway test instance — write to it freely.** That matters: several branches (the degraded
+  weight paths, the FR-6 density fallback) are unreachable with realistic data and can only be
+  tested by creating records. Name them `zzz-*` and delete them after.
 
 ## How to start a session
 
