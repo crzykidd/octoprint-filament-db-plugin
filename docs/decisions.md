@@ -49,10 +49,18 @@ mistaken for noise.
 (including code scanning result upload) is free and on by default for public repositories;
 `security_and_analysis` on the repo has no `advanced_security` toggle at all (that field only
 exists for private repos), and Actions are already enabled with `allowed_actions: all`. No repo
-settings change was made or was necessary — `codeql.yml`'s own push to `dev`... actually doesn't
-run it (see the trigger design below); its first real run is on `dev`'s push-triggered `ci.yml` plus
-whatever the branch's next `main`-bound event is. See the CI run report in the handoff for how it
-was actually verified.
+settings change was made or was necessary.
+
+**5. `codeql.yml`'s design deliberately never fires on a `dev` push (rule 2, copied from
+filament-bridge), which means it can't be verified the same way `ci.yml` was.** `workflow_dispatch`
+was the first idea but doesn't work either: GitHub only allows manually dispatching a workflow that
+is already present on the repo's *default* branch, and this repo's default branch is `main`, which
+this task must never push to. Verified instead with a throwaway two-commit sequence on `dev`:
+temporarily widen `push:` to `branches: [main, dev]`, push, confirm both the `Analyze (python)` and
+`Analyze (javascript-typescript)` jobs go green and that SARIF actually lands
+(`GET /code-scanning/analyses` showed both, `results_count` 4 and 0 respectively), then revert to
+the real `branches: [main]` trigger in the very next commit. `codeql.yml`'s permanent, shipped
+version never had the `dev` branch in it.
 
 ## 2026-08-02 — Merging to `main` is the user's gate; the session merged without permission
 

@@ -203,6 +203,13 @@
                                     "This filament has no density set -- grams " +
                                     "consumed on this spool will be estimated.",
                                 type: "warning",
+                                // PNotify v2 -- the version OctoPrint ships --
+                                // renders `text` as raw HTML by default. Set on
+                                // every call site, not just the ones with
+                                // non-literal text, so a later edit that
+                                // interpolates a value cannot silently become an
+                                // XSS vector (octoscanner SEC-0011).
+                                text_escape: true,
                             });
                         }
                     })
@@ -210,10 +217,17 @@
                         if (global.PNotify) {
                             new PNotify({
                                 title: "Filament DB",
+                                // This one is the live vector: the value is a
+                                // server error string, and api.py surfaces
+                                // `str(exc)` from the Filament DB client -- so
+                                // Filament-DB-controlled content (filament names,
+                                // response bodies) reaches it. Rendered as raw
+                                // HTML that is DOM XSS.
                                 text:
                                     (xhr.responseJSON && xhr.responseJSON.error) ||
                                     "Could not assign spool",
                                 type: "error",
+                                text_escape: true,
                             });
                         }
                     });

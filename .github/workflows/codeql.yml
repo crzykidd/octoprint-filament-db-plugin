@@ -7,15 +7,8 @@ on:
   # push would duplicate the pull_request run during an open PR (the same
   # stuck-required-check failure mode as ci.yml's push-only rule) and adds
   # heavy load to what are, on this project, frequent dev pushes.
-  # TEMP (2026-08-02): `dev` is temporarily added here so this push actually
-  # triggers a real run to verify the workflow before it's relied on --
-  # workflow_dispatch can't be used for that because GitHub only allows manually
-  # dispatching a workflow that already exists on the default branch, and this
-  # repo can't push this file to `main` without a PR/merge. Removed in the very
-  # next commit; the permanent trigger is `push: branches: [main]` only -- see
-  # the reasoning below, which is what actually ships.
   push:
-    branches: [main, dev]
+    branches: [main]
   pull_request:
     branches: [main]
   schedule:
