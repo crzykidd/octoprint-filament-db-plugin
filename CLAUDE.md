@@ -56,14 +56,14 @@ commit as any structural change — PRD rule N-8.*
 | Slicer metadata not parsed; material/sufficiency check wrong | `metering/gcode_meta.py` + its test | FR-4 |
 | Filament DB request/response, auth | `client/filamentdb.py`, `client/models.py` + `tests/test_filamentdb_client.py` | FR-1, FR-2, C-3, C-7 |
 | Spool list stale / TTL / manual refresh | `client/cache.py` | FR-2 |
-| Remaining weight wrong; degraded weight paths (missing tare/nominal/gross, overfilled) | `weights.py` + `tests/test_weights.py` (Python) and `static/js/filamentdb-weights.js` (JS port — kept in sync by hand, see its docstring) | C-2, §Weight display |
+| Remaining weight wrong; degraded weight paths (missing tare/nominal/gross, overfilled) | `weights.py` + `tests/test_weights.py` — the sole implementation, server-side only; `api.py`/`assignment.py` call it to annotate what they return, the frontend only renders `weightText`/`weightPercent` | C-2, §Weight display |
 | Assignment not saved, duplicate-tool warning, stored record shape | `assignment.py` | FR-2 |
 | Usage not committed / committed twice / wrong payload | `job.py`, `retry.py` | FR-7, FR-9, **C-1** |
 | Write failed / retry / journal state machine | `journal.py`, `retry.py` | FR-9, FR-9b |
 | History UI, failure report, retry & discard actions | `static/js/filamentdb.js`, `api.py` | FR-9b |
 | Print lifecycle events, cancel double-fire | `job.py` | FR-7 |
 | Tool slots, MMU, extruder count | `static/js/filamentdb.js` (`toolCount`, reads `printerProfilesViewModel.currentProfileData()` — **not** `currentProfile()`, which is just the id string) | FR-3 |
-| Spool search ranking (five-tier match order) | `search.py` + `tests/test_search_ranking.py` (Python reference/spec) and `static/js/filamentdb-search.js` (JS port actually used by the picker) | FR-2 |
+| Spool search ranking (five-tier match order) | `static/js/filamentdb-search.js` — the sole implementation (must run client-side, FR-2); tested via `tests/js/filamentdb_search_test.js` + `tests/test_search_ranking_js.py` (Node, run inside the normal `pytest` invocation) | FR-2 |
 | Picker modal: filters, sort, assign/clear, duplicate-warning UI | `static/js/filamentdb-picker.js`, `templates/filamentdb_sidebar.jinja2` | FR-2 |
 | Pre-print confirmation dialog; Print button not gated | `static/js/filamentdb.js` (wraps `printerStateViewModel.print` **and** `loadAndPrint`) | FR-4, Q-9 |
 | Sidebar rows / live odometer readout | `static/js/filamentdb.js`, `templates/filamentdb_sidebar.jinja2` | FR-2, FR-8 |

@@ -9,11 +9,19 @@ OWNS: the gross-to-net weight computation for an assigned spool --
     tare, nominal, or gross itself is missing (never show gross as if it
     were net), plus the progress-bar clamp when net exceeds nominal on an
     overfilled reel. Pure: plain numbers in, a small immutable result out.
+    **This is the sole implementation** -- there is no JS port. The
+    frontend (``static/js/filamentdb.js``, ``filamentdb-picker.js``)
+    consumes the ``weightText``/``weightPercent`` fields ``api.py`` and
+    ``assignment.py`` compute by calling into this module server-side; it
+    contains no weight arithmetic of its own (see docs/decisions.md for
+    why the earlier hand-synced JS port was removed).
 DOES NOT OWN: fetching those numbers from Filament DB (``client/``), where
-    an assignment is stored (``assignment.py``), or the mm->gram
+    an assignment is stored (``assignment.py`` -- calls this module to
+    annotate what it returns, but doesn't own the computation), the mm->gram
     *extrusion* conversion during a print (``metering/convert.py``, a later
     step and a different computation entirely -- a live meter reading of
-    filament consumed, not a spool's static remaining stock).
+    filament consumed, not a spool's static remaining stock), or deciding
+    which endpoints attach a weight (``api.py``).
 """
 
 from dataclasses import dataclass
@@ -59,6 +67,19 @@ def _trim(value):
     if rounded == int(rounded):
         return str(int(rounded))
     return f"{rounded:.1f}"
+
+
+def format_grams(value):
+    """Trim-format a bare grams figure the same way the nominal/gross-only
+    weight text does (see ``_trim``) -- exposed publicly for callers that
+    need a formatted number outside a full ``compute_weight()`` result,
+    e.g. the sidebar's gross/tare hover tooltip, which shows both figures
+    unconditionally regardless of which (if any) degraded path applies.
+    Returns ``None`` for ``None`` input so the caller supplies its own
+    "unknown"/"not set" copy rather than this module inventing UI text for
+    a context it doesn't otherwise own.
+    """
+    return None if value is None else _trim(value)
 
 
 def compute_weight(gross, tare, nominal):

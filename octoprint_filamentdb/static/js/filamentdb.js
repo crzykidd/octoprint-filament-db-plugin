@@ -5,17 +5,20 @@
 //     bound to both the sidebar and settings panels -- plus: the live
 //     raw-millimetre odometer readout (FR-5's UI instrument), Test
 //     Connection (FR-1), loading/caching the spool library from
-//     GET /api/plugin/filamentdb, the sidebar's per-tool rows (computed
-//     net weight via FilamentDBWeights, C-2), clear/deep-link actions,
-//     and tool numbering (count from the printer profile, 1-based
-//     display). The picker modal itself is
+//     GET /api/plugin/filamentdb, the sidebar's per-tool rows (rendering
+//     the server-computed net weight, C-2 -- this file contains no weight
+//     arithmetic of its own, see weights.py's module docstring), clear/
+//     deep-link actions, and tool numbering (count from the printer
+//     profile, 1-based display). The picker modal itself is
 //     `FilamentDBPicker.attach(self)`, called at the end of the
 //     constructor -- split out to stay under the 500-line module cap
 //     (PRD N-1); see that file's docstring.
 // DOES NOT OWN: the search ranking algorithm (filamentdb-search.js), the
-//     weight arithmetic itself (filamentdb-weights.js -- this file only
-//     calls it), the picker modal's own state (filamentdb-picker.js), or
-//     any server-side state (api.py, assignment.py, client/).
+//     weight computation itself (weights.py, server-side only -- this
+//     file only renders the `weightText`/`weightPercent`/`grossText`/
+//     `tareText` fields the API already computed), the picker modal's own
+//     state (filamentdb-picker.js), or any server-side state (api.py,
+//     assignment.py, client/).
 
 $(function () {
     // Stateless: formats a millimetre total as e.g. "4 062.3 mm"
@@ -188,9 +191,11 @@ $(function () {
                                 locationName: spool.locationId,
                                 locationId: spool.locationId,
                                 retired: !!spool.retired,
-                                totalWeight: spool.totalWeight,
-                                spoolWeight: filament.spoolWeight,
-                                netFilamentWeight: filament.netFilamentWeight,
+                                // Weight is computed server-side (C-2,
+                                // weights.py) and arrives ready to render
+                                // -- no client-side arithmetic here.
+                                weightText: spool.weightText,
+                                weightPercent: spool.weightPercent,
                                 density: filament.density,
                             });
                         });
@@ -252,12 +257,12 @@ $(function () {
                     color: null,
                 };
                 if (record) {
+                    // `display` arrives pre-annotated by the server
+                    // (assignment.py's AssignmentStore._decorate()) with
+                    // weightText/weightPercent and the grossText/tareText
+                    // hover figures -- this file only renders them, no
+                    // weight arithmetic of its own (C-2, weights.py).
                     var display = record.display || {};
-                    var weight = FilamentDBWeights.compute(
-                        display.totalWeight,
-                        display.spoolWeight,
-                        display.netFilamentWeight
-                    );
                     row.vendor = display.vendor;
                     row.name = display.name;
                     row.type = display.type;
@@ -269,23 +274,18 @@ $(function () {
                     row.color = display.color || "#808080";
                     row.spoolLabel = display.label;
                     row.instanceId = record.instanceId;
-                    row.weightText = weight.text;
-                    row.hasBar = weight.percent !== null;
-                    row.percentStyle = "width: " + (weight.percent || 0) + "%";
-                    row.percentText =
-                        weight.percent !== null ? Math.round(weight.percent) + "%" : "";
+                    row.weightText = display.weightText;
+                    row.hasBar = display.weightPercent !== null && display.weightPercent !== undefined;
+                    row.percentStyle = "width: " + (display.weightPercent || 0) + "%";
+                    row.percentText = row.hasBar ? Math.round(display.weightPercent) + "%" : "";
                     row.filamentId = record.filamentId;
                     row.spoolId = record.spoolId;
                     row.deepLink = self.filamentDbDeepLink(record.filamentId, record.spoolId);
                     row.hoverTitle =
                         "Gross " +
-                        (display.totalWeight !== null && display.totalWeight !== undefined
-                            ? FilamentDBWeights.trim(display.totalWeight) + " g"
-                            : "unknown") +
+                        (display.grossText || "unknown") +
                         " · Tare " +
-                        (display.spoolWeight !== null && display.spoolWeight !== undefined
-                            ? FilamentDBWeights.trim(display.spoolWeight) + " g"
-                            : "not set");
+                        (display.tareText || "not set");
                 }
                 rows.push(row);
             }

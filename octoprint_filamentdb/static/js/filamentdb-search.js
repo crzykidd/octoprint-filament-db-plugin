@@ -1,15 +1,16 @@
 // Copyright (C) 2026 crzykidd
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
-// OWNS: the picker's five-tier spool search ranking (FR-2) -- the runtime
-//     path a user actually drives, since the picker must search
-//     client-side over the cache with no request per keystroke. This is a
-//     hand-kept port of octoprint_filamentdb/search.py's identical rules;
-//     that Python module carries the pytest coverage (a browser cannot run
-//     a Python test) -- see its docstring and docs/decisions.md for why the
-//     two are separate files kept in sync by hand rather than one shared
-//     source. Any change to the tier order or matching rule must be made
-//     in both.
+// OWNS: the picker's five-tier spool search ranking (FR-2) -- and, since
+//     search must run client-side over the cache with no request per
+//     keystroke, this is the **sole implementation**: there is no Python
+//     port. (An earlier Python reference module,
+//     octoprint_filamentdb/search.py, carried pytest coverage for the same
+//     rules but had no runtime role and was deleted -- see
+//     docs/decisions.md.) Coverage lives in
+//     tests/js/filamentdb_search_test.js, run under Node via
+//     tests/test_search_ranking_js.py so `pytest` still runs everything in
+//     one command.
 // DOES NOT OWN: fetching or caching the spool list (the FilamentDBViewModel
 //     in filamentdb.js), or rendering results (the picker modal template).
 //

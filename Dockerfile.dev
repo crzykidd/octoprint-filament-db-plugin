@@ -11,6 +11,16 @@ FROM octoprint/octoprint:latest
 
 ARG OCTOPRINT_VERSION=2.0.0rc4
 
+# Node is a test-only dependency: tests/test_search_ranking_js.py shells out to
+# `node` to run tests/js/filamentdb_search_test.js against
+# static/js/filamentdb-search.js -- the picker's search ranking has no Python
+# port (FR-2 requires it client-side), so this is the only way for `pytest` to
+# exercise the code that actually runs, in one command, in one place. Debian
+# bullseye's apt package (Node 12) is old but sufficient for this script -- no
+# npm dependencies, no package.json, nothing that would need a newer runtime.
+RUN apt-get update && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
 # GOTCHA: the base image sets PIP_USER=true with PYTHONUSERBASE=/octoprint/plugins,
 # and /octoprint is a VOLUME. A plain `pip install` would therefore land in the volume
 # and be shadowed the moment the bind mount is attached at runtime — the container

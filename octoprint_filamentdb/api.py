@@ -15,8 +15,10 @@ OWNS: the ``SimpleApiPlugin`` surface at ``/api/plugin/filamentdb`` -- GET
     returns the API key.
 DOES NOT OWN: the HTTP client itself (``client/filamentdb.py``), the
     assignment choke point (``assignment.py`` -- this module calls it,
-    never writes settings directly), or weight arithmetic (``weights.py``
-    -- called here only to annotate the assign response, not stored).
+    never writes settings directly, and that module does its own weight
+    annotation on everything it returns), or weight arithmetic
+    (``weights.py`` -- called here only to annotate each spool in the
+    library listing and the assign response, not stored).
 """
 
 import flask
@@ -27,6 +29,26 @@ from . import settings_keys, weights
 from .assignment import AssignmentStore
 from .client.cache import FilamentCache
 from .client.filamentdb import FilamentDBClient, FilamentDBError
+
+
+def _serialize_spool(spool, filament):
+    # Each spool is decorated with its computed weight here -- the picker
+    # (the list/search endpoint's consumer) renders `weightText` directly
+    # rather than recomputing client-side (C-2; weights.py is the sole
+    # implementation, see its module docstring).
+    weight = weights.compute_weight(
+        spool.total_weight, filament.spool_weight, filament.net_filament_weight
+    )
+    return {
+        "id": spool.id,
+        "instanceId": spool.instance_id,
+        "label": spool.label,
+        "totalWeight": spool.total_weight,
+        "retired": spool.retired,
+        "locationId": spool.location_id,
+        "weightText": weight.text,
+        "weightPercent": weight.percent,
+    }
 
 
 def _serialize_filament(filament):
@@ -40,17 +62,7 @@ def _serialize_filament(filament):
         "spoolWeight": filament.spool_weight,
         "netFilamentWeight": filament.net_filament_weight,
         "parentId": filament.parent_id,
-        "spools": [
-            {
-                "id": s.id,
-                "instanceId": s.instance_id,
-                "label": s.label,
-                "totalWeight": s.total_weight,
-                "retired": s.retired,
-                "locationId": s.location_id,
-            }
-            for s in filament.spools
-        ],
+        "spools": [_serialize_spool(s, filament) for s in filament.spools],
     }
 
 

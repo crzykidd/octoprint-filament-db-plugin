@@ -13,10 +13,12 @@
 //     observables/methods directly onto the shared viewmodel instance, so
 //     the sidebar and picker templates bind against one `self` as usual.
 // DOES NOT OWN: the ranking algorithm itself (filamentdb-search.js), the
-//     weight computation (filamentdb-weights.js), or the library
-//     cache/sidebar rows it reads (`self.library`, `self.toolLabel`,
-//     `self.toolForSpool`, `self.loadLibrary`, `self.libraryLoaded` --
-//     all set up by filamentdb.js before calling attach()).
+//     weight computation (server-side only, weights.py -- each library
+//     row already carries the `weightText`/`weightPercent` api.py
+//     computed, this file just renders it), or the library cache/sidebar
+//     rows it reads (`self.library`, `self.toolLabel`, `self.toolForSpool`,
+//     `self.loadLibrary`, `self.libraryLoaded` -- all set up by
+//     filamentdb.js before calling attach()).
 
 (function (global) {
     "use strict";
@@ -132,11 +134,10 @@
                 return {
                     row: row,
                     tierLabel: tierLabel(result.tier),
-                    weightText: FilamentDBWeights.compute(
-                        row.totalWeight,
-                        row.spoolWeight,
-                        row.netFilamentWeight
-                    ).text,
+                    // Server-computed (C-2, weights.py) -- already on the
+                    // row from filamentdb.js's loadLibrary(), no
+                    // client-side arithmetic here.
+                    weightText: row.weightText,
                     swatch: row.color || "#808080",
                     alreadyAssigned: assignedTool !== null,
                     alreadyAssignedLabel:

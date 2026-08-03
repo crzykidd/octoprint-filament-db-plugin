@@ -126,15 +126,18 @@ class FilamentDBPlugin(
         return {
             # Order doesn't affect correctness (every OCTOPRINT_VIEWMODELS
             # constructor runs after all plugin assets have loaded), but
-            # is kept dependency-first for readability: the two pure
-            # helper globals, then the picker (which uses both), then the
-            # main viewmodel (which uses all three via
+            # is kept dependency-first for readability: the search ranking
+            # helper (the sole implementation -- FR-2 needs it client-side,
+            # no round trip per keystroke), then the picker (which uses
+            # it), then the main viewmodel (which uses both via
             # FilamentDBPicker.attach(self) -- see that file's docstring
             # for why the picker is a separate module at all: keeping
-            # filamentdb.js under the 500-line module cap, N-1).
+            # filamentdb.js under the 500-line module cap, N-1). Weight
+            # computation has no JS port -- it is server-side only
+            # (weights.py via api.py/assignment.py); the frontend just
+            # renders the `weightText`/`weightPercent` fields it receives.
             "js": [
                 "js/filamentdb-search.js",
-                "js/filamentdb-weights.js",
                 "js/filamentdb-picker.js",
                 "js/filamentdb.js",
             ],

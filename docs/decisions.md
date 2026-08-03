@@ -6,6 +6,76 @@ reader would otherwise have to re-derive.
 
 ---
 
+## 2026-08-02 — Deduped weights/search: server-owns-weights vs. JS-owns-search, and how the
+weight annotation reaches every frontend read path
+
+`prompts/2026-08-02-dedupe-weights-search.md`. Removed the two hand-synced ports left over from
+the spool-picker step: `static/js/filamentdb-weights.js` (deleted; `weights.py` is now the sole
+implementation, called server-side) and `octoprint_filamentdb/search.py` +
+`tests/test_search_ranking.py` (deleted; `static/js/filamentdb-search.js` is now the sole
+implementation, since FR-2 requires search to run client-side with no round trip per keystroke).
+Verified byte-identical rendered output against the live #177 acceptance target and all four
+degraded-weight paths, in both the sidebar and the picker (the picker is a separate call site of
+the deleted JS and the likelier place for a silent regression — Playwright-driven, both call
+sites checked).
+
+**1. Weight annotation had to reach three different read paths, not just the two the prompt named
+(the list endpoint and the assign response) — solved by decorating inside `AssignmentStore`, not
+just `api.py`.** The prompt said "api.py decorates... the list/search endpoint as well as the
+assign response, which already does this." But the sidebar's per-tool rows read from
+`selectedSpools`, which is populated two ways: the initial `GET /api/plugin/filamentdb` *and* the
+websocket `assignment` push that `AssignmentStore._push()` fires directly — bypassing `api.py`
+entirely. Decorating only in `api.py` would have left the push (the path that actually updates the
+sidebar live after an assign) sending undecorated records. Fixed by moving the annotation into
+`AssignmentStore` itself: `_raw_all()` reads settings unchanged (used for the read-modify-write in
+`set()`/`clear()` and for `find_tool_for_spool()`, which never needed weight), while `all()`,
+`get()`, and `set()`'s return value all go through a new `_decorate()` that computes
+`weightText`/`weightPercent` (and `grossText`/`tareText` for the sidebar's gross/tare hover
+tooltip, which also used to call the deleted JS's `trim()`) fresh from the record's own cached
+`display` fields — no live fetch, so the "self-sufficient for offline rendering" property the
+class's docstring already claimed still holds, just computed server-side. The persisted settings
+record itself stays undecorated (annotation happens only on read), so there's nothing to migrate
+for assignments written before this change.
+
+**2. `weights.py` gained a small public API surface it didn't have before: `format_grams()`.** The
+sidebar's hover tooltip ("Gross 1042 g · Tare 190 g") formats bare gross/tare figures independently
+of the full `compute_weight()` text, and used to call the deleted JS port's `trim()` for that. Making
+this JS-arithmetic-free (per the prompt's "no weight arithmetic... at all" bar) meant exposing a
+thin public wrapper around the module's existing private `_trim()` rather than duplicating the
+rounding rule a third place or leaving the hover unformatted.
+
+**3. Node added to `Dockerfile.dev` via `apt-get install nodejs`, not a pinned newer version.**
+Debian bullseye's own package is Node 12.22 — old, but the test script
+(`tests/js/filamentdb_search_test.js`) uses no npm dependencies and only broadly-supported syntax,
+so pinning a newer runtime via nodesource or similar was judged unnecessary complexity for a
+test-only dependency. `tests/test_search_ranking_js.py` shells out to it and asserts exit code 0,
+**failing** (never skipping) if `node` is missing — confirmed by running `pytest -k search -v`
+and observing the test actually execute (11 sub-assertions inside the Node script, all passing),
+not skip.
+
+**4. The Playwright browser check ran from the host via a scratch `npx playwright` install, not
+the `claude-in-chrome` extension** (not connected in this session) **and not inside the dev
+container** (no Node runtime available for a browser at all, and Playwright's browsers are a
+separate several-hundred-MB download not worth adding to `Dockerfile.dev` for one verification
+step). Logged in through the real "Please log in" page (not a passive/local-network autologin —
+none is configured), drove the sidebar and picker for all five weight cases plus a search check,
+and confirmed the one console error present (`ErrorTrackingViewModel` / `octoprint_release_channel`
+in OctoPrint's own `packed_core.js`) is pre-existing and unrelated: it fires from core's error
+tracker reading a `softwareupdate` settings key that's absent because `softwareupdate` is
+deliberately disabled on this dev instance (`private_data/dev-credentials.md`), not from anything
+under `octoprint_filamentdb`.
+
+**5. The four degraded-weight `zzz-*` Filament DB records were created via direct `POST
+/api/filaments` calls (curl), not through the plugin UI** — there's no create-filament flow in this
+plugin (out of scope, v1 only assigns existing spools) — and deleted afterward via `DELETE
+/api/filaments/{id}`, which is a soft delete to Filament DB's own trash (confirmed by the trash
+listing already containing many earlier sessions' `zzz-*` records) rather than a hard purge. This
+matches the established convention on this dev instance; no plugin-side action needed beyond
+calling `DELETE`. The tool-0 assignment used for the live check (spool `#47`, pre-existing from
+before this session) was restored to its original state afterward rather than left cleared.
+
+---
+
 ## 2026-08-02 — Filament DB client + spool picker: three real Knockout bugs only a live
 browser found, plus the scope calls behind them
 
